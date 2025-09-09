@@ -1,4 +1,3 @@
-# dummy line
 import streamlit as st
 import pypdfium2 as pdfium
 from azure.ai.formrecognizer import DocumentAnalysisClient
@@ -118,12 +117,16 @@ st.sidebar.json(dictionary)
 
 uploaded_file = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"])
 
-if uploaded_file.type == "application/pdf":
-    # convert_from_bytes の代わりに pypdfium2 でレンダリング
-    pdf = pdfium.PdfDocument(io.BytesIO(file_bytes))
-    pages = [page.render(scale=200/72).to_pil().convert("RGB") for page in pdf]
+if uploaded_file is not None:
+    file_bytes = uploaded_file.read()
+    if uploaded_file.type == "application/pdf":
+        pages = convert_from_bytes(file_bytes, dpi=200)
+    else:
+        pages = [Image.open(io.BytesIO(file_bytes))]
+    
 else:
-    pages = [Image.open(io.BytesIO(file_bytes))]
+    st.info("📂 ここにファイルをアップロードしてください")
+
 
 
     for page_index, page_img in enumerate(pages):
