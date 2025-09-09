@@ -17,8 +17,26 @@ from typing import List, Tuple, Dict, Any
 import gc
 
 # === New: Word出力用 ===
+# dummy line
 from docx import Document
 from docx.shared import Cm, Pt
+
+EMU_PER_CM = 360000.0  # 1 cm = 360,000 EMU
+
+def to_cm(val) -> float:
+    """
+    python-docx の Length（intサブクラス）や素の int を cm(float) に変換。
+    """
+    try:
+        # Length なら .cm を優先（環境によっては無い場合もある）
+        return float(getattr(val, "cm"))
+    except Exception:
+        # int(EMU) の可能性 → EMU → cm 変換
+        try:
+            return float(val) / EMU_PER_CM
+        except Exception:
+            return float(val)
+
 
 # ==== 環境変数 ====
 AZURE_ENDPOINT = os.getenv("AZURE_DOCINT_ENDPOINT")
@@ -199,18 +217,9 @@ def line_xy(line_obj: Any) -> Tuple[float, float]:
     return (min(xs or [0.0]), min(ys or [0.0]))
 
 # === New: Word（docx）をざっくり元レイアウトに寄せて生成 ===
-def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
-    """
-    pages_layout: 各ページの辞書リスト
-      {
-        "page_width": float,
-        "page_height": float,
-        "unit": str,  # "pixel", "inch", "millimeter" など（相対値で使うので文字列は参考）
-        "lines": [ { "text": str, "x": float, "y": float }, ... ]  # y昇順x昇順でなくてもOK
-      }
-    """
+# dummy line
+def build_docx_from_layout(pages_layout: list[dict]) -> bytes:
     doc = Document()
-    # A4縦＋余白（2cm）
     section = doc.sections[0]
     section.page_width = Cm(21.0)
     section.page_height = Cm(29.7)
@@ -218,9 +227,13 @@ def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
     section.right_margin = Cm(2.0)
     section.top_margin = Cm(2.0)
     section.bottom_margin = Cm(2.0)
-    content_width_cm = (section.page_width - section.left_margin - section.right_margin).cm
 
-    # 既定フォント（環境により変化）
+    # ここを修正：演算後に .cm を呼ばず、先に個別に cm 化してから引き算
+    page_w_cm = to_cm(section.page_width)
+    left_cm = to_cm(section.left_margin)
+    right_cm = to_cm(section.right_margin)
+    content_width_cm = max(0.1, page_w_cm - left_cm - right_cm)
+
     style = doc.styles["Normal"]
     style.font.name = "Yu Gothic"
     style.font.size = Pt(11)
@@ -230,11 +243,8 @@ def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
         ph = float(page.get("page_height") or 1.0)
         lines = page.get("lines", [])
 
-        # y→xで安定ソート
         lines_sorted = sorted(lines, key=lambda r: (r["y"], r["x"]))
-
-        # 行間のしきい値（縦方向クラスタリング）
-        y_thresh = ph * 0.018  # ページ高さの約1.8%（調整可）
+        y_thresh = ph * 0.018
         prev_y = None
 
         for item in lines_sorted:
@@ -242,25 +252,18 @@ def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
             x = float(item["x"])
             y = float(item["y"])
 
-            # 新しい段落
             para = doc.add_paragraph()
             run = para.add_run(txt)
 
-            # 左インデント：左余白＋(x/pw) * content_width
-            # 深すぎる食い込みにならないように最大0.9倍にクリップ
+            # 左インデント（0〜0.9*可用幅にクリップ）
             indent_cm = max(0.0, min(0.9 * content_width_cm, (x / max(pw, 1e-6)) * content_width_cm))
             para.paragraph_format.left_indent = Cm(indent_cm)
 
-            # 行間を少し詰める（見た目用）
             para.paragraph_format.space_after = Pt(2)
-
-            # 縦方向の大きな飛びは段落前スペースで表現
             if prev_y is not None and (y - prev_y) > y_thresh:
                 para.paragraph_format.space_before = Pt(8)
-
             prev_y = y
 
-        # ページ区切り（最終ページ以外）
         if idx < len(pages_layout):
             doc.add_page_break()
 
