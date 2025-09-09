@@ -13,12 +13,13 @@ from openai import OpenAI
 import re
 import difflib
 from itertools import zip_longest
+from typing import List, Tuple
 
 # ==== 環境変数 ====
 AZURE_ENDPOINT = os.getenv("AZURE_DOCINT_ENDPOINT")
 AZURE_KEY = os.getenv("AZURE_DOCINT_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL_NAME = os.getenv("OCR_GPT_MODEL", "gpt-5")  # 必要なら環境変数で切替
+MODEL_NAME = os.getenv("OCR_GPT_MODEL", "gpt-5")  # gpt-5 / gpt-5-mini など
 
 # ==== 事前チェック ====
 if not AZURE_ENDPOINT or not AZURE_KEY:
@@ -99,21 +100,19 @@ OCR結果:
 {text}
 """.strip()
     try:
-        # GPT-5系：Responses API。temperatureは未サポートのため指定しない。
+        # GPT-5系：Responses API。temperatureは未サポート（指定しない）
         resp = openai_client.responses.create(
             model=MODEL_NAME,
             input=prompt,
             text={"verbosity": "low"},
             reasoning={"effort": "minimal"}
         )
-        # 出力テキスト抽出（将来のスキーマ変化に強め）
+        # 出力テキスト抽出
+        if hasattr(resp, "output_text") and resp.output_text:
+            return resp.output_text.strip()
         out_parts = []
-        output = getattr(resp, "output", None)
-        if output is None and hasattr(resp, "output_text"):
-            return (resp.output_text or "").strip() or text
-        for item in output or []:
-            content = getattr(item, "content", []) or []
-            for part in content:
+        for item in getattr(resp, "output", []) or []:
+            for part in getattr(item, "content", []) or []:
                 t = getattr(part, "text", None)
                 if t:
                     out_parts.append(t)
@@ -123,21 +122,53 @@ OCR結果:
         st.warning(f"GPT補正をスキップしました（エラー）：{e}")
         return text
 
-def render_pdf_bytes_to_images(pdf_bytes: bytes, dpi: int = 200) -> list[Image.Image]:
-    imgs = []
+def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: int = 200) -> Tuple[List[Image.Image], List[int]]:
+    """選択ページ（0始まり）だけレンダリングして返す。page_numbersは1始まりで返す。"""
+    imgs: List[Image.Image] = []
+    nums: List[int] = []
     pdf = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
     scale = dpi / 72.0
-    for i in range(len(pdf)):
-        page = pdf[i]
-        pil = page.render(scale=scale).to_pil()
-        imgs.append(pil.convert("RGB"))
-    return imgs
+    for idx in indices_0based:
+        page = pdf[idx]
+        pil = page.render(scale=scale).to_pil().convert("RGB")
+        imgs.append(pil)
+        nums.append(idx + 1)
+    return imgs, nums
 
 def is_pdf(b: bytes) -> bool:
     return len(b) >= 5 and b[:5] == b"%PDF-"
 
+def parse_page_spec(spec: str, max_pages: int) -> List[int]:
+    """
+    '1,3,5-7' のような指定を0始まりのインデックス配列に変換。
+    範囲外は自動でクリップ。重複は排除。昇順ソート。
+    """
+    s = (spec or "").strip()
+    if not s:
+        return []
+    out = set()
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    for p in parts:
+        if "-" in p:
+            a, b = p.split("-", 1)
+            try:
+                start = max(1, min(int(a), int(b)))
+                end = min(max_pages, max(int(a), int(b)))
+                for n in range(start, end + 1):
+                    out.add(n - 1)
+            except ValueError:
+                continue
+        else:
+            try:
+                n = int(p)
+                if 1 <= n <= max_pages:
+                    out.add(n - 1)
+            except ValueError:
+                continue
+    return sorted(out)
+
 # ==== UI ====
-st.title("📄 Document Intelligence OCR - GPT＋印影除去＋欠落補正（複数ページ対応）")
+st.title("📄 Document Intelligence OCR - GPT＋印影除去＋欠落補正（ページ先指定）")
 
 dictionary = load_json(DICT_FILE)
 st.sidebar.subheader("📖 現在の辞書")
@@ -158,54 +189,89 @@ if not uploaded_file:
 file_bytes = uploaded_file.read()
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-# ==== ファイル読込（堅牢化） ====
-try:
-    if uploaded_file.type == "application/pdf" or uploaded_file.name.lower().endswith(".pdf") or is_pdf(file_bytes):
-        pages = render_pdf_bytes_to_images(file_bytes, dpi=200)
-    else:
+# ==== PDF/画像の分岐（ここでは まだOCR開始しない） ====
+is_input_pdf = uploaded_file.type == "application/pdf" or uploaded_file.name.lower().endswith(".pdf") or is_pdf(file_bytes)
+
+# ==== PDF の場合：まずページ指定フォームを出す（Submit後にのみOCR開始） ====
+if is_input_pdf:
+    # 軽量にページ数だけ取得（レンダリングはまだしない）
+    try:
+        pdf_for_count = pdfium.PdfDocument(io.BytesIO(file_bytes))
+        total_pages = len(pdf_for_count)
+    except Exception as e:
+        st.exception(e)
+        st.stop()
+
+    with st.form("pdf_select_form"):
+        st.subheader("▶ OCRするページを先に選択")
+        select_mode = st.radio(
+            "選択方法",
+            options=["全ページ", "範囲指定", "ページ番号指定（例: 1,3,5-7）"],
+            index=1 if total_pages > 1 else 0,
+            horizontal=True
+        )
+        dpi = st.slider("レンダリングDPI（高いほど精細・重い）", min_value=72, max_value=300, value=200, step=4)
+
+        if select_mode == "範囲指定" and total_pages > 1:
+            start, end = st.slider(
+                "処理するページ範囲（1始まり）",
+                min_value=1, max_value=total_pages,
+                value=(1, min(total_pages, 5))
+            )
+            chosen_indices = list(range(start - 1, end))
+        elif select_mode == "ページ番号指定（例: 1,3,5-7）":
+            spec = st.text_input("ページ番号（カンマ区切り、範囲はハイフン）", value="1-3" if total_pages >= 3 else "1")
+            chosen_indices = parse_page_spec(spec, total_pages)
+            if not chosen_indices:
+                st.info("有効なページ番号を入力してください。例: 1,3,5-7")
+        else:
+            # 全ページ
+            chosen_indices = list(range(total_pages))
+
+        submitted = st.form_submit_button("このページだけOCRを実行")
+    # ---- フォーム外：未Submitならここで終了（OCRは走らない） ----
+    if not submitted or not chosen_indices:
+        st.stop()
+
+    # 必要なページだけレンダリング
+    try:
+        pages, page_numbers = render_pdf_selected_pages(file_bytes, chosen_indices, dpi=dpi)
+    except Exception as e:
+        st.exception(e)
+        st.stop()
+
+else:
+    # 画像ファイル：ページ指定は不要
+    try:
         try:
-            pages = [Image.open(io.BytesIO(file_bytes)).convert("RGB")]
+            img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
         except Exception:
             arr = np.frombuffer(file_bytes, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if img is None:
+            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if bgr is None:
                 raise ValueError("画像の読み込みに失敗しました（JPG/PNG/PDFのみ対応）。")
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            pages = [Image.fromarray(img)]
-except Exception as e:
-    st.exception(e)
-    st.stop()
+            img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        pages = [img]
+        page_numbers = [1]
+    except Exception as e:
+        st.exception(e)
+        st.stop()
 
-if not pages:
-    st.error("ページを生成できませんでした。ファイル形式をご確認ください。")
-    st.stop()
+# ==== ここからOCR開始（PDFも画像も合流） ====
+all_corrected: List[str] = []
 
-# ==== ページ範囲選択 ====
-total_pages = len(pages)
-if total_pages > 1:
-    start, end = st.slider(
-        "処理するページ範囲を選択（1始まり）",
-        min_value=1, max_value=total_pages, value=(1, min(total_pages, 5))
-    )
-    proc_range = range(start - 1, end)
-else:
-    st.info("このファイルは1ページです。")
-    proc_range = range(0, 1)
-
-# ==== メイン処理 ====
-all_corrected: list[str] = []
-
-for page_index in proc_range:
-    page_img = pages[page_index]
-    page_num = page_index + 1
+for page_img, page_num in zip(pages, page_numbers):
     st.write(f"## ページ {page_num}")
 
+    # 印影除去
     clean_img = remove_red_stamp(page_img)
 
+    # Azureに送る前にPNG化
     buf = io.BytesIO()
     clean_img.save(buf, format="PNG")
     buf.seek(0)
 
+    # OCR
     with st.spinner("OCRを実行中..."):
         try:
             poller = client.begin_analyze_document("prebuilt-read", document=buf)
@@ -214,6 +280,7 @@ for page_index in proc_range:
             st.exception(e)
             st.stop()
 
+    # 各ページごとにOCRしているため結果は先頭を参照
     doc_page = result.pages[0] if getattr(result, "pages", None) else None
     if not doc_page:
         st.warning("OCR結果にページが見つかりませんでした。")
@@ -221,8 +288,11 @@ for page_index in proc_range:
 
     default_text = "\n".join([line.content for line in doc_page.lines])
 
+    # GPT補正
+    dictionary = load_json(DICT_FILE)  # 処理中に辞書が更新される可能性を考慮して毎回読み出し
     gpt_checked_text = gpt_fix_text(default_text, dictionary)
 
+    # ==== タブ ====
     tab1, tab2, tab3, tab4 = st.tabs(["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
     with tab1:
         st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
