@@ -1,0 +1,10 @@
+streamlit>=1.36
+azure-ai-formrecognizer>=3.3.0
+azure-core>=1.30
+openai>=1.40
+pillow>=10
+opencv-python-headless>=4.9
+numpy>=1.26
+pypdfium2>=4.30
+reportlab>=4.2
+python-docx>=0.8.11

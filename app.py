@@ -15,6 +15,7 @@ import difflib
 from itertools import zip_longest
 from typing import List, Tuple, Dict, Any
 import gc
+import time  # ★追加
 
 # === New: Word出力用 ===
 # dummy line
@@ -54,9 +55,11 @@ if not AZURE_ENDPOINT or not AZURE_KEY:
 client = DocumentAnalysisClient(endpoint=AZURE_ENDPOINT, credential=AzureKeyCredential(AZURE_KEY))
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ==== ファイルパス ====
-DICT_FILE = "ocr_char_corrections.json"
-UNTRAINED_FILE = "untrained_confusions.json"
+# ==== 共有辞書の場所（環境変数で指定） ====  ★ここを差し替え
+DICT_DIR = os.getenv("OCR_DICT_DIR", ".")  # 未設定ならカレント
+DICT_FILE = os.path.join(DICT_DIR, "ocr_char_corrections.json")
+UNTRAINED_FILE = os.path.join(DICT_DIR, "untrained_confusions.json")
+TRAINED_FILE = os.path.join(DICT_DIR, "trained_confusions.json")
 
 JP_CHAR_RE = re.compile(r"^[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]$")
 
@@ -74,12 +77,29 @@ def remove_red_stamp(img_pil: Image.Image) -> Image.Image:
     img[mask > 0] = [255, 255, 255]
     return Image.fromarray(img)
 
-def load_json(path: str) -> dict:
-    return json.load(open(path, "r", encoding="utf-8")) if os.path.exists(path) else {}
+# ★安全なJSON I/O（アトミック保存＋軽いリトライ）
+def load_json(path: str, retries: int = 3, delay: float = 0.1) -> dict:
+    return _load_json_impl(path, retries, delay)
+
+def _load_json_impl(path: str, retries: int, delay: float) -> dict:
+    for _ in range(retries):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (json.JSONDecodeError, PermissionError):
+            time.sleep(delay)
+    return {}
 
 def save_json(obj: dict, path: str):
-    with open(path, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
 
 def learn_charwise_with_missing(original: str, corrected: str) -> dict:
     learned = {}
@@ -286,6 +306,14 @@ st.sidebar.write({
     "MODEL": MODEL_NAME,
     "BATCH_SIZE": BATCH_SIZE,
 })
+# ★どの辞書を参照しているか分かるように追加
+st.sidebar.markdown("### 📂 辞書の参照先")
+st.sidebar.write({
+    "OCR_DICT_DIR": os.path.abspath(DICT_DIR),
+    "DICT_FILE": DICT_FILE,
+    "UNTRAINED_FILE": UNTRAINED_FILE,
+    "TRAINED_FILE": TRAINED_FILE,
+})
 
 uploaded_file = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"])
 if not uploaded_file:
@@ -382,6 +410,7 @@ if is_input_pdf:
             azure_lines = getattr(doc_page, "lines", []) or []
             default_text = "\n".join([line.content for line in azure_lines])
 
+            # ★共有辞書から毎回最新を読み込んで補正
             dictionary = load_json(DICT_FILE)
             gpt_checked_text = gpt_fix_text(default_text, dictionary)
 
@@ -400,7 +429,7 @@ if is_input_pdf:
                 if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
                     learned = learn_charwise_with_missing(default_text, corrected_text)
                     if learned:
-                        update_dictionary_and_untrained(learned)
+                        update_dictionary_and_untrained(learned)  # ★共有辞書を更新
                         st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
                     else:
                         st.info("修正が検出されませんでした。")
@@ -411,8 +440,6 @@ if is_input_pdf:
             all_corrected_texts.append(final_text_page)
 
             # === (2) Word用レイアウト収集 ===
-            #   - Azureの行座標を使って左インデントや段落の間隔を再現
-            #   - 行テキストは、GPT補正結果の行を優先（行数が合わなければ可能な範囲で上から対応）
             gpt_lines = [ln for ln in (corrected_text or gpt_checked_text).splitlines()]
             lines_for_layout = []
             for i, ln in enumerate(azure_lines):
@@ -505,6 +532,7 @@ else:
         azure_lines = getattr(doc_page, "lines", []) or []
         default_text = "\n".join([line.content for line in azure_lines])
 
+        # ★共有辞書を使用
         dictionary = load_json(DICT_FILE)
         gpt_checked_text = gpt_fix_text(default_text, dictionary)
 
@@ -522,7 +550,7 @@ else:
             if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
                 learned = learn_charwise_with_missing(default_text, corrected_text)
                 if learned:
-                    update_dictionary_and_untrained(learned)
+                    update_dictionary_and_untrained(learned)  # ★共有辞書を更新
                     st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
                 else:
                     st.info("修正が検出されませんでした。")
