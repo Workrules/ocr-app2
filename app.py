@@ -9,7 +9,7 @@ from PIL import Image
 import cv2
 import numpy as np
 import json
-import openai
+from openai import OpenAI
 import re
 import difflib
 from itertools import zip_longest
@@ -23,7 +23,8 @@ if not endpoint or not key:
 client = DocumentAnalysisClient(endpoint=endpoint, credential=AzureKeyCredential(key))
 
 # ==== OpenAI APIキー ====
-openai.api_key = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ==== 辞書ファイル ====
 DICT_FILE = "ocr_char_corrections.json"
@@ -100,13 +101,14 @@ OCR結果:
 {text}
 """
     try:
-        response = openai.chat.completions.create(
+        response = openai_client.chat.completions.create(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
         return response.choices[0].message.content.strip()
-    except Exception:
+    except Exception as e:
+        st.warning(f"GPT補正をスキップしました（エラー）：{e}")
         return text
 
 # ==== PDFレンダリング ====
@@ -124,8 +126,16 @@ def render_pdf_bytes_to_images(pdf_bytes: bytes, dpi: int = 200):
 st.title("📄 Document Intelligence OCR - GPT＋印影除去＋欠落補正")
 
 dictionary = load_json(DICT_FILE)
+
+# 診断（環境変数など）
 st.sidebar.subheader("📖 現在の辞書")
 st.sidebar.json(dictionary)
+st.sidebar.markdown("### 🔧 診断")
+st.sidebar.write({
+    "AZURE_DOCINT_ENDPOINT_set": bool(os.getenv("AZURE_DOCINT_ENDPOINT")),
+    "AZURE_DOCINT_KEY_set": bool(os.getenv("AZURE_DOCINT_KEY")),
+    "OPENAI_API_KEY_set": bool(os.getenv("OPENAI_API_KEY")),
+})
 
 uploaded_file = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"])
 
@@ -151,11 +161,15 @@ if not pages:
 
 # ==== ページ範囲選択（長尺PDF向けの高速化） ====
 total_pages = len(pages)
-start, end = st.slider(
-    "処理するページ範囲を選択（1始まり）",
-    min_value=1, max_value=total_pages, value=(1, min(total_pages, 5))
-)
-proc_range = range(start - 1, end)  # 0始まりのインデックス
+if total_pages > 1:
+    start, end = st.slider(
+        "処理するページ範囲を選択（1始まり）",
+        min_value=1, max_value=total_pages, value=(1, min(total_pages, 5))
+    )
+    proc_range = range(start - 1, end)  # 0始まりのインデックス
+else:
+    st.info("このファイルは1ページです。")
+    proc_range = range(0, 1)
 
 # ==== ページごとの処理 ====
 all_corrected = []
@@ -175,8 +189,12 @@ for page_index in proc_range:
 
     # OCR
     with st.spinner("OCRを実行中..."):
-        poller = client.begin_analyze_document("prebuilt-read", document=buf)
-        result = poller.result()
+        try:
+            poller = client.begin_analyze_document("prebuilt-read", document=buf)
+            result = poller.result()
+        except Exception as e:
+            st.exception(e)
+            st.stop()
 
     # 各ページごとにOCRをかけているため、結果は先頭ページを参照するのが堅牢
     doc_page = result.pages[0] if getattr(result, "pages", None) else None
