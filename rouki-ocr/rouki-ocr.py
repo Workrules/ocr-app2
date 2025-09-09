@@ -1,4 +1,3 @@
-# dummy line
 import streamlit as st
 import pypdfium2 as pdfium
 from azure.ai.formrecognizer import DocumentAnalysisClient

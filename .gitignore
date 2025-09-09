@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+shared-dict/
+*.tmp
+*.pt
+*_confusions.json
+ocr_char_corrections.json
