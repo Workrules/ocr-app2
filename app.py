@@ -1,3 +1,4 @@
+# dummy line
 import streamlit as st
 import pypdfium2 as pdfium
 from azure.ai.formrecognizer import DocumentAnalysisClient
@@ -91,7 +92,7 @@ def update_dictionary_and_untrained(learned: dict):
 def gpt_fix_text(text: str, dictionary: dict) -> str:
     prompt = f"""
 次のOCR結果を自然な日本語に直してください。
-- 日本語に存在しない文字（例: 罗, 罒など）は「□」にしてください。
+- 日本語に存在しない文字は「□」にしてください。
 - 辞書候補を参考にしてください: {json.dumps(dictionary, ensure_ascii=False)}
 - 意味を勝手に補完せず、最小限の修正だけ行ってください。
 
@@ -108,6 +109,17 @@ OCR結果:
     except Exception:
         return text
 
+# ==== PDFレンダリング ====
+def render_pdf_bytes_to_images(pdf_bytes: bytes, dpi: int = 200):
+    imgs = []
+    pdf = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
+    scale = dpi / 72.0
+    for i in range(len(pdf)):
+        page = pdf[i]
+        pil = page.render(scale=scale).to_pil()
+        imgs.append(pil.convert("RGB"))
+    return imgs
+
 # ==== Streamlit UI ====
 st.title("📄 Document Intelligence OCR - GPT＋印影除去＋欠落補正")
 
@@ -117,64 +129,73 @@ st.sidebar.json(dictionary)
 
 uploaded_file = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"])
 
-if uploaded_file is not None:
-    file_bytes = uploaded_file.read()
-    if uploaded_file.type == "application/pdf":
-        pages = convert_from_bytes(file_bytes, dpi=200)
-    else:
-        pages = [Image.open(io.BytesIO(file_bytes))]
-    
-else:
+if not uploaded_file:
     st.info("📂 ここにファイルをアップロードしてください")
+    st.stop()
 
+file_bytes = uploaded_file.read()
 
+# PDF/画像の分岐
+try:
+    if uploaded_file.type == "application/pdf":
+        pages = render_pdf_bytes_to_images(file_bytes, dpi=200)
+    else:
+        pages = [Image.open(io.BytesIO(file_bytes)).convert("RGB")]
+except Exception as e:
+    st.error(f"ファイルの読み込みに失敗しました: {e}")
+    st.stop()
 
-    for page_index, page_img in enumerate(pages):
-        page_num = page_index + 1
-        st.write(f"## ページ {page_num}")
+if not pages:
+    st.error("ページを生成できませんでした。ファイル形式をご確認ください。")
+    st.stop()
 
-        # 印影除去
-        clean_img = remove_red_stamp(page_img)
+# ==== ページごとの処理 ====
+for page_index, page_img in enumerate(pages):
+    page_num = page_index + 1
+    st.write(f"## ページ {page_num}")
 
-        # Azureに送る前にPNG圧縮
-        buf = io.BytesIO()
-        clean_img.save(buf, format="PNG")
-        buf.seek(0)
+    # 印影除去
+    clean_img = remove_red_stamp(page_img)
 
-        # OCR
-        with st.spinner("OCRを実行中..."):
-            poller = client.begin_analyze_document("prebuilt-read", document=buf)
-            result = poller.result()
+    # Azureに送る前にPNG圧縮
+    buf = io.BytesIO()
+    clean_img.save(buf, format="PNG")
+    buf.seek(0)
 
-        doc_page = next((p for p in result.pages if p.page_number == page_num), None)
-        if not doc_page:
-            st.warning("OCR結果にページが見つかりませんでした。")
-            continue
+    # OCR
+    with st.spinner("OCRを実行中..."):
+        poller = client.begin_analyze_document("prebuilt-read", document=buf)
+        result = poller.result()
 
-        default_text = "\n".join([line.content for line in doc_page.lines])
+    doc_page = next((p for p in result.pages if p.page_number == page_num), None)
+    if not doc_page:
+        st.warning("OCR結果にページが見つかりませんでした。")
+        continue
 
-        # GPT補正
-        gpt_checked_text = gpt_fix_text(default_text, dictionary)
+    default_text = "\n".join([line.content for line in doc_page.lines])
 
-        # ==== タブ ====
-        tab1, tab2, tab3, tab4 = st.tabs(
-            ["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"]
+    # GPT補正
+    gpt_checked_text = gpt_fix_text(default_text, dictionary)
+
+    # ==== タブ ====
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"]
+    )
+    with tab1:
+        st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
+    with tab2:
+        st.text_area(f"OCRテキスト（ページ {page_num}）", default_text, height=320)
+    with tab3:
+        st.text_area(f"GPT補正（ページ {page_num}）", gpt_checked_text, height=320)
+    with tab4:
+        corrected_text = st.text_area(
+            f"手作業修正（ページ {page_num}）", gpt_checked_text, height=320, key=f"edit_{page_num}"
         )
-        with tab1:
-            st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
-        with tab2:
-            st.text_area(f"OCRテキスト（ページ {page_num}）", default_text, height=320)
-        with tab3:
-            st.text_area(f"GPT補正（ページ {page_num}）", gpt_checked_text, height=320)
-        with tab4:
-            corrected_text = st.text_area(
-                f"手作業修正（ページ {page_num}）", gpt_checked_text, height=320, key=f"edit_{page_num}"
-            )
-            if st.button(f"修正を保存 (ページ {page_num})"):
-                learned = learn_charwise_with_missing(default_text, corrected_text)
-                if learned:
-                    update_dictionary_and_untrained(learned)
-                    st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
-                else:
-                    st.info("修正が検出されませんでした。")
-                st.rerun()
+        if st.button(f"修正を保存 (ページ {page_num})"):
+            learned = learn_charwise_with_missing(default_text, corrected_text)
+            if learned:
+                update_dictionary_and_untrained(learned)
+                st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
+            else:
+                st.info("修正が検出されませんでした。")
+            st.rerun()
