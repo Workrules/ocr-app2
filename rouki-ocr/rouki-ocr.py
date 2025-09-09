@@ -30,7 +30,6 @@ MODEL_NAME = os.getenv("OCR_GPT_MODEL", "gpt-5")  # gpt-5 / gpt-5-mini など
 BATCH_SIZE = max(1, int(os.getenv("OCR_BATCH_PAGES", "10")))  # 10ページずつ処理
 
 # ==== 共有辞書の場所（環境変数で指定） ====
-# 未設定ならカレントディレクトリ（rouki-ocr/）を使う
 DICT_DIR = os.getenv("OCR_DICT_DIR", ".")
 DICT_FILE = os.path.join(DICT_DIR, "ocr_char_corrections.json")
 UNTRAINED_FILE = os.path.join(DICT_DIR, "untrained_confusions.json")
@@ -60,9 +59,6 @@ def remove_red_stamp(img_pil: Image.Image) -> Image.Image:
     return Image.fromarray(img)
 
 def load_json(path: str, retries: int = 3, delay: float = 0.1) -> dict:
-    """
-    共有JSONを安全に読む（書き込み直後の壊れかけに備え軽いリトライ）
-    """
     for _ in range(retries):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -74,9 +70,6 @@ def load_json(path: str, retries: int = 3, delay: float = 0.1) -> dict:
     return {}
 
 def save_json(obj: dict, path: str):
-    """
-    一時ファイルに書いてfsync→原子的置換で上書き
-    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -99,7 +92,6 @@ def learn_charwise_with_missing(original: str, corrected: str) -> dict:
     return learned
 
 def update_dictionary_and_untrained(learned: dict):
-    # OCR補正用辞書を更新
     dictionary = load_json(DICT_FILE)
     for w, meta in learned.items():
         if w in dictionary:
@@ -112,7 +104,6 @@ def update_dictionary_and_untrained(learned: dict):
             dictionary[w] = meta
     save_json(dictionary, DICT_FILE)
 
-    # 学習候補（untrained）を更新
     untrained = load_json(UNTRAINED_FILE)
     for w, meta in learned.items():
         untrained[w] = meta["right"]
@@ -129,7 +120,6 @@ OCR結果:
 {text}
 """.strip()
     try:
-        # GPT-5系：Responses API（temperature指定しない）
         resp = openai_client.responses.create(
             model=MODEL_NAME,
             input=prompt,
@@ -138,7 +128,6 @@ OCR結果:
         )
         if hasattr(resp, "output_text") and resp.output_text:
             return resp.output_text.strip()
-        # フォールバック抽出
         out_parts = []
         for item in getattr(resp, "output", []) or []:
             for part in getattr(item, "content", []) or []:
@@ -155,9 +144,7 @@ def is_pdf(b: bytes) -> bool:
     return len(b) >= 5 and b[:5] == b"%PDF-"
 
 def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: int = 200) -> Tuple[List[Image.Image], List[int]]:
-    """選択ページ（0始まり）だけレンダリングして返す。page_numbersは1始まりで返す。"""
-    imgs: List[Image.Image] = []
-    nums: List[int] = []
+    imgs: List[Image.Image] = []; nums: List[int] = []
     pdf = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
     scale = dpi / 72.0
     for idx in indices_0based:
@@ -167,9 +154,6 @@ def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: 
     return imgs, nums
 
 def parse_page_spec(spec: str, max_pages: int) -> List[int]:
-    """
-    '1,3,5-7' → 0始まりインデックス配列（範囲外クリップ・重複排除・昇順）
-    """
     s = (spec or "").strip()
     if not s:
         return []
@@ -195,13 +179,11 @@ def parse_page_spec(spec: str, max_pages: int) -> List[int]:
     return sorted(out)
 
 def chunked(seq: List[int], n: int) -> List[List[int]]:
-    """seqをn個ずつに分割して順に返す"""
     return [seq[i:i+n] for i in range(0, len(seq), n)]
 
 # === EMU / cm 変換ヘルパー ===
-EMU_PER_CM = 360000.0  # 1 cm = 360,000 EMU
+EMU_PER_CM = 360000.0
 def to_cm(val) -> float:
-    """python-docxのLengthやint(EMU)をcm(float)に変換"""
     try:
         return float(getattr(val, "cm"))
     except Exception:
@@ -212,10 +194,6 @@ def to_cm(val) -> float:
 
 # === 行のバウンディングボックス取得 ===
 def line_bbox(line_obj):
-    """
-    AzureのLineから (x_min, x_max, y_min, y_max) を返す。
-    polygon or bounding_polygon を優先利用。
-    """
     poly = getattr(line_obj, "polygon", None) or getattr(line_obj, "bounding_polygon", None)
     if not poly:
         return 0.0, 0.0, 0.0, 0.0
@@ -229,16 +207,11 @@ def line_bbox(line_obj):
 
 # === インデント段のクラスタリング ===
 def cluster_indents_cm(indent_values_cm, epsilon_cm=0.6):
-    """
-    1次元クラスタリング。前の中心からepsilon_cm以内なら同クラスタ。
-    返り値: [{"center_cm": float, "members": [values...]}, ...]
-    """
     vals = sorted(indent_values_cm)
     clusters = []
     for v in vals:
         if not clusters:
-            clusters.append({"center_cm": v, "members": [v]})
-            continue
+            clusters.append({"center_cm": v, "members": [v]}); continue
         if abs(v - clusters[-1]["center_cm"]) <= epsilon_cm:
             c = clusters[-1]; c["members"].append(v)
             c["center_cm"] = sum(c["members"]) / len(c["members"])
@@ -251,38 +224,22 @@ def build_docx_from_layout(
     pages_layout: List[Dict[str, Any]],
     *,
     add_label: bool = False,
-    center_thresh_ratio: float = 0.06,  # 中央判定の許容（ページ幅の6%）
-    right_thresh_ratio: float = 0.04,   # 右寄せ判定
-    indent_epsilon_cm: float = 0.6      # インデント段のしきい値
+    center_thresh_ratio: float = 0.06,
+    right_thresh_ratio: float = 0.04,
+    indent_epsilon_cm: float = 0.6
 ) -> Tuple[bytes, List[Dict[str, Any]]]:
-    """
-    pages_layout: [
-      {
-        "page_width": float, "page_height": float, "unit": "pixel",
-        "lines": [{"text": str, "x_min": float, "x_max": float, "y": float}, ...]
-      }, ...
-    ]
-    戻り値: (docx_bytes, indent_summary)
-    """
     doc = Document()
     section = doc.sections[0]
-    section.page_width = Cm(21.0)
-    section.page_height = Cm(29.7)
-    section.left_margin = Cm(2.0)
-    section.right_margin = Cm(2.0)
-    section.top_margin = Cm(2.0)
-    section.bottom_margin = Cm(2.0)
+    section.page_width = Cm(21.0); section.page_height = Cm(29.7)
+    section.left_margin = Cm(2.0); section.right_margin = Cm(2.0)
+    section.top_margin = Cm(2.0); section.bottom_margin = Cm(2.0)
 
     page_w_cm = to_cm(section.page_width)
-    left_cm = to_cm(section.left_margin)
-    right_cm = to_cm(section.right_margin)
+    left_cm = to_cm(section.left_margin); right_cm = to_cm(section.right_margin)
     content_width_cm = max(0.1, page_w_cm - left_cm - right_cm)
 
-    style = doc.styles["Normal"]
-    style.font.name = "Yu Gothic"
-    style.font.size = Pt(11)
+    style = doc.styles["Normal"]; style.font.name = "Yu Gothic"; style.font.size = Pt(11)
 
-    # 全ページのインデント値を収集
     all_indents_cm = []
     for page in pages_layout:
         pw = float(page.get("page_width") or 1.0)
@@ -293,12 +250,10 @@ def build_docx_from_layout(
     clusters = cluster_indents_cm(all_indents_cm, epsilon_cm=indent_epsilon_cm)
     clusters = sorted(clusters, key=lambda c: c["center_cm"])
     for idx, c in enumerate(clusters):
-        c["index"] = idx
-        c["count"] = len(c["members"])
+        c["index"] = idx; c["count"] = len(c["members"])
 
     def nearest_cluster_idx(indent_cm: float) -> int:
-        if not clusters:
-            return 0
+        if not clusters: return 0
         return min(range(len(clusters)), key=lambda i: abs(indent_cm - clusters[i]["center_cm"]))
 
     for page_i, page in enumerate(pages_layout, start=1):
@@ -311,17 +266,12 @@ def build_docx_from_layout(
         right_allow_px = pw * right_thresh_ratio
 
         prev_y = None
-        y_thresh = ph * 0.018  # ページ高さの約1.8%
+        y_thresh = ph * 0.018
 
         for item in lines:
-            txt = item["text"]
-            x_min = float(item["x_min"])
-            x_max = float(item["x_max"])
-            y = float(item["y"])
-
+            txt = item["text"]; x_min = float(item["x_min"]); x_max = float(item["x_max"]); y = float(item["y"])
             para = doc.add_paragraph()
 
-            # 整列判定
             line_center = (x_min + x_max) / 2.0
             align = "LEFT"
             if abs(line_center - center_px) <= center_allow_px:
@@ -329,33 +279,24 @@ def build_docx_from_layout(
             elif (max(0.0, pw - x_max)) <= right_allow_px:
                 align = "RIGHT"
 
-            # Wordでのインデント
             indent_cm = (x_min / max(pw, 1e-6)) * content_width_cm
             ind_idx = nearest_cluster_idx(indent_cm)
             snapped_cm = clusters[ind_idx]["center_cm"] if clusters else indent_cm
 
-            # （任意）ラベル
             if add_label:
                 tag = f"[{align} | ind={ind_idx}] "
-                lab = para.add_run(tag)
-                lab.font.size = Pt(8)
-                lab.font.color.rgb = RGBColor(120, 120, 120)
+                lab = para.add_run(tag); lab.font.size = Pt(8); lab.font.color.rgb = RGBColor(120, 120, 120)
 
-            # 本文
-            run = para.add_run(txt)
-
-            # 左インデント（0〜0.95*可用幅）
+            para.add_run(txt)
             para.paragraph_format.left_indent = Cm(max(0.0, min(0.95 * content_width_cm, snapped_cm)))
 
-            # 整列
-            if align == WD_ALIGN_PARAGRAPH.CENTER or align == "CENTER":
+            if align == "CENTER":
                 para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            elif align == WD_ALIGN_PARAGRAPH.RIGHT or align == "RIGHT":
+            elif align == "RIGHT":
                 para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
             else:
                 para.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
-            # 行間・段落前
             para.paragraph_format.space_after = Pt(2)
             if prev_y is not None and (y - prev_y) > y_thresh:
                 para.paragraph_format.space_before = Pt(8)
@@ -364,20 +305,20 @@ def build_docx_from_layout(
         if page_i < len(pages_layout):
             doc.add_page_break()
 
-    bio = io.BytesIO()
-    doc.save(bio); bio.seek(0)
+    bio = io.BytesIO(); doc.save(bio); bio.seek(0)
     summary = [{"index": c["index"], "center_cm": round(c["center_cm"], 2), "count": c["count"]} for c in clusters]
     return bio.read(), summary
 
 # ==== UI ====
-st.title("📄 rouki-ocr（共有辞書対応） - ページ先指定 / 10ページバッチ / GPT補正 / Word出力（整列＆インデント段）")
+st.title("📄 rouki-ocr（共有辞書） - ページ先指定 / 10ページバッチ / GPT補正 / Word出力（整列＆段）")
 
 # 診断・設定
-st.sidebar.subheader("📖 現在の辞書（プレビュー）")
-st.sidebar.write({"OCR_DICT_DIR": os.path.abspath(DICT_DIR),
-                  "DICT_FILE": DICT_FILE,
-                  "UNTRAINED_FILE": UNTRAINED_FILE})
-
+st.sidebar.subheader("📖 辞書の参照先")
+st.sidebar.write({
+    "OCR_DICT_DIR": os.path.abspath(DICT_DIR),
+    "DICT_FILE": DICT_FILE,
+    "UNTRAINED_FILE": UNTRAINED_FILE,
+})
 dictionary_preview = load_json(DICT_FILE)
 st.sidebar.json(dictionary_preview)
 
@@ -387,13 +328,18 @@ st.sidebar.write({
     "AZURE_DOCINT_KEY_set": bool(AZURE_KEY),
     "OPENAI_API_KEY_set": bool(OPENAI_API_KEY),
     "MODEL": MODEL_NAME,
-    "BATCH_SIZE": BATCH_SIZE,
+    "BATCH_SIZE(default)": BATCH_SIZE,
 })
+
+# --- デバッグ項目 ---
+st.sidebar.markdown("### 🛠 デバッグ")
+skip_gpt = st.sidebar.checkbox("GPT補正をスキップ", value=False)
+ocr_timeout = st.sidebar.slider("OCRタイムアウト（秒）", 10, 180, 60, step=5)
+batch_size_override = st.sidebar.number_input("バッチサイズ上書き", 1, 20, value=BATCH_SIZE)
 
 uploaded_file = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"])
 if not uploaded_file:
-    st.info("📂 ここにファイルをアップロードしてください")
-    st.stop()
+    st.info("📂 ここにファイルをアップロードしてください"); st.stop()
 
 file_bytes = uploaded_file.read()
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -409,28 +355,20 @@ if is_input_pdf:
 
     with st.form("pdf_select_form"):
         st.subheader("▶ OCRするページを先に選択")
-        select_mode = st.radio(
-            "選択方法",
-            options=["全ページ", "範囲指定", "ページ番号指定（例: 1,3,5-7）"],
-            index=1 if total_pages > 1 else 0,
-            horizontal=True
-        )
-        dpi = st.slider("レンダリングDPI（高いほど精細・重い）", min_value=72, max_value=300, value=200, step=4)
+        select_mode = st.radio("選択方法", options=["全ページ", "範囲指定", "ページ番号指定（例: 1,3,5-7）"],
+                               index=1 if total_pages > 1 else 0, horizontal=True)
+        dpi = st.slider("レンダリングDPI（高いほど精細・重い）", 72, 300, 200, step=4)
 
-        # レイアウト復元パラメータ
         center_pct = st.slider("中央揃え判定しきい値（%/ページ幅）", 2, 12, 6, step=1)
         indent_eps = st.slider("インデント段まとめ しきい値（cm）", 0.2, 1.5, 0.6, step=1/10)
         show_labels = st.checkbox("Wordにレイアウトラベルを書く（[CENTER | ind=n]）", value=False)
 
         if select_mode == "範囲指定" and total_pages > 1:
-            start, end = st.slider(
-                "処理するページ範囲（1始まり）",
-                min_value=1, max_value=total_pages,
-                value=(1, min(total_pages, 5))
-            )
+            start, end = st.slider("処理するページ範囲（1始まり）", 1, total_pages, (1, min(total_pages, 5)))
             chosen_indices = list(range(start - 1, end))
         elif select_mode == "ページ番号指定（例: 1,3,5-7）":
-            spec = st.text_input("ページ番号（カンマ区切り、範囲はハイフン）", value="1-3" if total_pages >= 3 else "1")
+            spec = st.text_input("ページ番号（カンマ区切り、範囲はハイフン）",
+                                 value="1-3" if total_pages >= 3 else "1")
             chosen_indices = parse_page_spec(spec, total_pages)
             if not chosen_indices:
                 st.info("有効なページ番号を入力してください。例: 1,3,5-7")
@@ -442,17 +380,16 @@ if is_input_pdf:
     if not submitted or not chosen_indices:
         st.stop()
 
-    # ==== 10ページずつのバッチ処理 ====
+    EFFECTIVE_BATCH = int(batch_size_override) if batch_size_override else BATCH_SIZE
+
     total_to_process = len(chosen_indices)
-    progress = st.progress(0.0)
-    status = st.empty()
-    all_corrected_texts: List[str] = []     # TXT出力（ページ見出しなし）
-    pages_layout: List[Dict[str, Any]] = [] # Word用レイアウト
+    progress = st.progress(0.0); status = st.empty()
+    all_corrected_texts: List[str] = []
+    pages_layout: List[Dict[str, Any]] = []
     done = 0
 
-    for batch_no, batch_indices in enumerate(chunked(chosen_indices, BATCH_SIZE), start=1):
-        status.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // BATCH_SIZE) + 1} を処理中（ページ: {', '.join(str(i+1) for i in batch_indices)}）")
-
+    for batch_no, batch_indices in enumerate(chunked(chosen_indices, EFFECTIVE_BATCH), start=1):
+        status.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} を処理中（ページ: {', '.join(str(i+1) for i in batch_indices)}）")
         try:
             pages, page_numbers = render_pdf_selected_pages(file_bytes, batch_indices, dpi=dpi)
         except Exception as e:
@@ -462,28 +399,29 @@ if is_input_pdf:
             st.write(f"## ページ {page_num}")
             clean_img = remove_red_stamp(page_img)
 
-            buf = io.BytesIO()
-            clean_img.save(buf, format="PNG"); buf.seek(0)
+            buf = io.BytesIO(); clean_img.save(buf, format="PNG"); buf.seek(0)
 
             with st.spinner("OCRを実行中..."):
+                t0 = time.perf_counter()
                 try:
                     poller = client.begin_analyze_document("prebuilt-read", document=buf)
-                    result = poller.result()
+                    result = poller.result(timeout=float(ocr_timeout))
                 except Exception as e:
-                    st.exception(e); st.stop()
+                    st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
+                    st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+                    continue
+                st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
 
             doc_page = result.pages[0] if getattr(result, "pages", None) else None
             if not doc_page:
                 st.warning("OCR結果にページが見つかりませんでした。")
-                done += 1; progress.progress(done / total_to_process)
-                continue
+                done += 1; progress.progress(done / total_to_process); continue
 
             azure_lines = getattr(doc_page, "lines", []) or []
             default_text = "\n".join([line.content for line in azure_lines])
 
-            # 共有辞書を毎回読み直して最新を反映
             dictionary = load_json(DICT_FILE)
-            gpt_checked_text = gpt_fix_text(default_text, dictionary)
+            gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
 
             tab1, tab2, tab3, tab4 = st.tabs(["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
             with tab1:
@@ -493,9 +431,7 @@ if is_input_pdf:
             with tab3:
                 st.text_area(f"GPT補正（ページ {page_num}）", gpt_checked_text, height=320, key=f"gpt_{page_num}")
             with tab4:
-                corrected_text = st.text_area(
-                    f"手作業修正（ページ {page_num}）", gpt_checked_text, height=320, key=f"edit_{page_num}"
-                )
+                corrected_text = st.text_area(f"手作業修正（ページ {page_num}）", gpt_checked_text, height=320, key=f"edit_{page_num}")
                 if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
                     learned = learn_charwise_with_missing(default_text, corrected_text)
                     if learned:
@@ -505,11 +441,9 @@ if is_input_pdf:
                         st.info("修正が検出されませんでした。")
                     st.rerun()
 
-            # TXT（ページ見出しなし）
             final_text_page = (corrected_text or gpt_checked_text).strip()
             all_corrected_texts.append(final_text_page)
 
-            # Wordレイアウト情報（x_min/x_max で整列・段を判定）
             gpt_lines = [ln for ln in (corrected_text or gpt_checked_text).splitlines()]
             lines_for_layout = []
             for i, ln in enumerate(azure_lines):
@@ -527,21 +461,15 @@ if is_input_pdf:
 
             done += 1; progress.progress(done / total_to_process)
 
-        # バッチ終了ごとにクリーンアップ
         del pages, page_numbers
         gc.collect()
 
     status.success("✅ すべてのページの処理が完了しました。")
 
-    # ==== ダウンロード（TXT / Word） ====
     if all_corrected_texts:
         joined_txt = "\n\n".join(all_corrected_texts)
-        st.download_button(
-            "📥 補正テキストをダウンロード（TXT, ページ見出しなし）",
-            data=joined_txt.encode("utf-8"),
-            file_name="ocr_corrected.txt",
-            mime="text/plain"
-        )
+        st.download_button("📥 補正テキスト（TXT, 見出しなし）", data=joined_txt.encode("utf-8"),
+                           file_name="ocr_corrected.txt", mime="text/plain")
 
     if pages_layout:
         try:
@@ -551,12 +479,9 @@ if is_input_pdf:
                 center_thresh_ratio=center_pct / 100.0,
                 indent_epsilon_cm=float(indent_eps)
             )
-            st.download_button(
-                "📥 Word（.docx）でダウンロード（レイアウト近似＋整列/段を反映）",
-                data=docx_bytes,
-                file_name="ocr_layout.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            st.download_button("📥 Word（.docx：整列/段を反映）", data=docx_bytes,
+                               file_name="ocr_layout.docx",
+                               mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             if indent_summary:
                 st.markdown("#### 検出されたインデント段")
                 for s in indent_summary:
@@ -565,7 +490,7 @@ if is_input_pdf:
             st.warning(f"Word出力に失敗しました：{e}")
 
 else:
-    # ==== 画像ファイル：そのまま1ページ処理 ====
+    # ==== 画像ファイル：1ページ処理 ====
     try:
         try:
             img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
@@ -579,38 +504,35 @@ else:
     except Exception as e:
         st.exception(e); st.stop()
 
-    # 画像にもWord出力を使うため、既定値を用意
-    center_pct = 6
-    indent_eps = 0.6
-    show_labels = False
-
-    all_corrected_texts: List[str] = []
-    pages_layout: List[Dict[str, Any]] = []
+    center_pct = 6; indent_eps = 0.6; show_labels = False
+    all_corrected_texts: List[str] = []; pages_layout: List[Dict[str, Any]] = []
 
     for page_img, page_num in zip(pages, page_numbers):
         st.write(f"## ページ {page_num}")
         clean_img = remove_red_stamp(page_img)
 
-        buf = io.BytesIO()
-        clean_img.save(buf, format="PNG"); buf.seek(0)
+        buf = io.BytesIO(); clean_img.save(buf, format="PNG"); buf.seek(0)
 
         with st.spinner("OCRを実行中..."):
+            t0 = time.perf_counter()
             try:
                 poller = client.begin_analyze_document("prebuilt-read", document=buf)
-                result = poller.result()
+                result = poller.result(timeout=float(ocr_timeout))
             except Exception as e:
-                st.exception(e); st.stop()
+                st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
+                st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+                continue
+            st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
 
         doc_page = result.pages[0] if getattr(result, "pages", None) else None
         if not doc_page:
-            st.warning("OCR結果にページが見つかりませんでした。")
-            continue
+            st.warning("OCR結果にページが見つかりませんでした。"); continue
 
         azure_lines = getattr(doc_page, "lines", []) or []
         default_text = "\n".join([line.content for line in azure_lines])
 
         dictionary = load_json(DICT_FILE)
-        gpt_checked_text = gpt_fix_text(default_text, dictionary)
+        gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
 
         tab1, tab2, tab3, tab4 = st.tabs(["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
         with tab1:
@@ -620,9 +542,7 @@ else:
         with tab3:
             st.text_area(f"GPT補正（ページ {page_num}）", gpt_checked_text, height=320, key=f"gpt_{page_num}")
         with tab4:
-            corrected_text = st.text_area(
-                f"手作業修正（ページ {page_num}）", gpt_checked_text, height=320, key=f"edit_{page_num}"
-            )
+            corrected_text = st.text_area(f"手作業修正（ページ {page_num}）", gpt_checked_text, height=320, key=f"edit_{page_num}")
             if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
                 learned = learn_charwise_with_missing(default_text, corrected_text)
                 if learned:
@@ -632,11 +552,9 @@ else:
                     st.info("修正が検出されませんでした。")
                 st.rerun()
 
-        # TXT（ページ見出しなし）
         final_text_page = (corrected_text or gpt_checked_text).strip()
         all_corrected_texts.append(final_text_page)
 
-        # Wordレイアウト情報
         gpt_lines = [ln for ln in (corrected_text or gpt_checked_text).splitlines()]
         lines_for_layout = []
         for i, ln in enumerate(azure_lines):
@@ -654,27 +572,17 @@ else:
 
     if all_corrected_texts:
         joined_txt = "\n\n".join(all_corrected_texts)
-        st.download_button(
-            "📥 補正テキストをダウンロード（TXT, ページ見出しなし）",
-            data=joined_txt.encode("utf-8"),
-            file_name="ocr_corrected.txt",
-            mime="text/plain"
-        )
+        st.download_button("📥 補正テキスト（TXT, 見出しなし）", data=joined_txt.encode("utf-8"),
+                           file_name="ocr_corrected.txt", mime="text/plain")
 
     if pages_layout:
         try:
             docx_bytes, indent_summary = build_docx_from_layout(
-                pages_layout,
-                add_label=show_labels,
-                center_thresh_ratio=center_pct / 100.0,
-                indent_epsilon_cm=float(indent_eps)
+                pages_layout, add_label=show_labels, center_thresh_ratio=center_pct/100.0, indent_epsilon_cm=float(indent_eps)
             )
-            st.download_button(
-                "📥 Word（.docx）でダウンロード（レイアウト近似＋整列/段を反映）",
-                data=docx_bytes,
-                file_name="ocr_layout.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            st.download_button("📥 Word（.docx：整列/段を反映）", data=docx_bytes,
+                               file_name="ocr_layout.docx",
+                               mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             if indent_summary:
                 st.markdown("#### 検出されたインデント段")
                 for s in indent_summary:
