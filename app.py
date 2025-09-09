@@ -5,7 +5,7 @@ from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.core.credentials import AzureKeyCredential
 import os
 import io
-from PIL import Image
+from PIL import Image, ImageFile
 import cv2
 import numpy as np
 import json
@@ -14,26 +14,29 @@ import re
 import difflib
 from itertools import zip_longest
 
-# ==== Azure Document Intelligence 認証情報 ====
-endpoint = os.getenv("AZURE_DOCINT_ENDPOINT")
-key = os.getenv("AZURE_DOCINT_KEY")
-if not endpoint or not key:
+# ==== 環境変数 ====
+AZURE_ENDPOINT = os.getenv("AZURE_DOCINT_ENDPOINT")
+AZURE_KEY = os.getenv("AZURE_DOCINT_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MODEL_NAME = os.getenv("OCR_GPT_MODEL", "gpt-5")  # 必要なら環境変数で切替
+
+# ==== 事前チェック ====
+if not AZURE_ENDPOINT or not AZURE_KEY:
     st.error("環境変数 AZURE_DOCINT_ENDPOINT と AZURE_DOCINT_KEY を設定してください。")
     st.stop()
-client = DocumentAnalysisClient(endpoint=endpoint, credential=AzureKeyCredential(key))
 
-# ==== OpenAI APIキー ====
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# ==== クライアント初期化 ====
+client = DocumentAnalysisClient(endpoint=AZURE_ENDPOINT, credential=AzureKeyCredential(AZURE_KEY))
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ==== 辞書ファイル ====
+# ==== ファイルパス ====
 DICT_FILE = "ocr_char_corrections.json"
 UNTRAINED_FILE = "untrained_confusions.json"
 
 JP_CHAR_RE = re.compile(r"^[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]$")
 
-# ==== 印影除去 ====
-def remove_red_stamp(img_pil):
+# ==== ユーティリティ ====
+def remove_red_stamp(img_pil: Image.Image) -> Image.Image:
     img = np.array(img_pil)
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
     lower_red1 = np.array([0, 70, 50])
@@ -43,10 +46,9 @@ def remove_red_stamp(img_pil):
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
     mask = cv2.bitwise_or(mask1, mask2)
-    img[mask > 0] = [255, 255, 255]  # 白塗り
+    img[mask > 0] = [255, 255, 255]
     return Image.fromarray(img)
 
-# ==== JSON管理 ====
 def load_json(path: str) -> dict:
     return json.load(open(path, "r", encoding="utf-8")) if os.path.exists(path) else {}
 
@@ -54,8 +56,7 @@ def save_json(obj: dict, path: str):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-# ==== 学習用の誤読抽出 ====
-def learn_charwise_with_missing(original: str, corrected: str):
+def learn_charwise_with_missing(original: str, corrected: str) -> dict:
     learned = {}
     sm = difflib.SequenceMatcher(None, original, corrected)
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -70,7 +71,6 @@ def learn_charwise_with_missing(original: str, corrected: str):
     return learned
 
 def update_dictionary_and_untrained(learned: dict):
-    # OCR補正用辞書を更新
     dictionary = load_json(DICT_FILE)
     for w, meta in learned.items():
         if w in dictionary:
@@ -83,13 +83,11 @@ def update_dictionary_and_untrained(learned: dict):
             dictionary[w] = meta
     save_json(dictionary, DICT_FILE)
 
-    # 学習候補リスト（untrained）を更新
     untrained = load_json(UNTRAINED_FILE)
     for w, meta in learned.items():
         untrained[w] = meta["right"]
     save_json(untrained, UNTRAINED_FILE)
 
-# ==== GPT補正 ====
 def gpt_fix_text(text: str, dictionary: dict) -> str:
     prompt = f"""
 次のOCR結果を自然な日本語に直してください。
@@ -99,20 +97,33 @@ def gpt_fix_text(text: str, dictionary: dict) -> str:
 
 OCR結果:
 {text}
-"""
+""".strip()
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
+        # GPT-5系：Responses API。temperatureは未サポートのため指定しない。
+        resp = openai_client.responses.create(
+            model=MODEL_NAME,
+            input=prompt,
+            text={"verbosity": "low"},
+            reasoning={"effort": "minimal"}
         )
-        return response.choices[0].message.content.strip()
+        # 出力テキスト抽出（将来のスキーマ変化に強め）
+        out_parts = []
+        output = getattr(resp, "output", None)
+        if output is None and hasattr(resp, "output_text"):
+            return (resp.output_text or "").strip() or text
+        for item in output or []:
+            content = getattr(item, "content", []) or []
+            for part in content:
+                t = getattr(part, "text", None)
+                if t:
+                    out_parts.append(t)
+        out = "".join(out_parts).strip()
+        return out or text
     except Exception as e:
         st.warning(f"GPT補正をスキップしました（エラー）：{e}")
         return text
 
-# ==== PDFレンダリング ====
-def render_pdf_bytes_to_images(pdf_bytes: bytes, dpi: int = 200):
+def render_pdf_bytes_to_images(pdf_bytes: bytes, dpi: int = 200) -> list[Image.Image]:
     imgs = []
     pdf = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
     scale = dpi / 72.0
@@ -122,72 +133,79 @@ def render_pdf_bytes_to_images(pdf_bytes: bytes, dpi: int = 200):
         imgs.append(pil.convert("RGB"))
     return imgs
 
-# ==== Streamlit UI ====
-st.title("📄 Document Intelligence OCR - GPT＋印影除去＋欠落補正")
+def is_pdf(b: bytes) -> bool:
+    return len(b) >= 5 and b[:5] == b"%PDF-"
+
+# ==== UI ====
+st.title("📄 Document Intelligence OCR - GPT＋印影除去＋欠落補正（複数ページ対応）")
 
 dictionary = load_json(DICT_FILE)
-
-# 診断（環境変数など）
 st.sidebar.subheader("📖 現在の辞書")
 st.sidebar.json(dictionary)
 st.sidebar.markdown("### 🔧 診断")
 st.sidebar.write({
-    "AZURE_DOCINT_ENDPOINT_set": bool(os.getenv("AZURE_DOCINT_ENDPOINT")),
-    "AZURE_DOCINT_KEY_set": bool(os.getenv("AZURE_DOCINT_KEY")),
-    "OPENAI_API_KEY_set": bool(os.getenv("OPENAI_API_KEY")),
+    "AZURE_DOCINT_ENDPOINT_set": bool(AZURE_ENDPOINT),
+    "AZURE_DOCINT_KEY_set": bool(AZURE_KEY),
+    "OPENAI_API_KEY_set": bool(OPENAI_API_KEY),
+    "MODEL": MODEL_NAME,
 })
 
 uploaded_file = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"])
-
 if not uploaded_file:
     st.info("📂 ここにファイルをアップロードしてください")
     st.stop()
 
 file_bytes = uploaded_file.read()
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-# PDF/画像の分岐
+# ==== ファイル読込（堅牢化） ====
 try:
-    if uploaded_file.type == "application/pdf":
+    if uploaded_file.type == "application/pdf" or uploaded_file.name.lower().endswith(".pdf") or is_pdf(file_bytes):
         pages = render_pdf_bytes_to_images(file_bytes, dpi=200)
     else:
-        pages = [Image.open(io.BytesIO(file_bytes)).convert("RGB")]
+        try:
+            pages = [Image.open(io.BytesIO(file_bytes)).convert("RGB")]
+        except Exception:
+            arr = np.frombuffer(file_bytes, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError("画像の読み込みに失敗しました（JPG/PNG/PDFのみ対応）。")
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            pages = [Image.fromarray(img)]
 except Exception as e:
-    st.error(f"ファイルの読み込みに失敗しました: {e}")
+    st.exception(e)
     st.stop()
 
 if not pages:
     st.error("ページを生成できませんでした。ファイル形式をご確認ください。")
     st.stop()
 
-# ==== ページ範囲選択（長尺PDF向けの高速化） ====
+# ==== ページ範囲選択 ====
 total_pages = len(pages)
 if total_pages > 1:
     start, end = st.slider(
         "処理するページ範囲を選択（1始まり）",
         min_value=1, max_value=total_pages, value=(1, min(total_pages, 5))
     )
-    proc_range = range(start - 1, end)  # 0始まりのインデックス
+    proc_range = range(start - 1, end)
 else:
     st.info("このファイルは1ページです。")
     proc_range = range(0, 1)
 
-# ==== ページごとの処理 ====
-all_corrected = []
+# ==== メイン処理 ====
+all_corrected: list[str] = []
 
 for page_index in proc_range:
     page_img = pages[page_index]
     page_num = page_index + 1
     st.write(f"## ページ {page_num}")
 
-    # 印影除去
     clean_img = remove_red_stamp(page_img)
 
-    # Azureに送る前にPNG圧縮
     buf = io.BytesIO()
     clean_img.save(buf, format="PNG")
     buf.seek(0)
 
-    # OCR
     with st.spinner("OCRを実行中..."):
         try:
             poller = client.begin_analyze_document("prebuilt-read", document=buf)
@@ -196,7 +214,6 @@ for page_index in proc_range:
             st.exception(e)
             st.stop()
 
-    # 各ページごとにOCRをかけているため、結果は先頭ページを参照するのが堅牢
     doc_page = result.pages[0] if getattr(result, "pages", None) else None
     if not doc_page:
         st.warning("OCR結果にページが見つかりませんでした。")
@@ -204,24 +221,20 @@ for page_index in proc_range:
 
     default_text = "\n".join([line.content for line in doc_page.lines])
 
-    # GPT補正
     gpt_checked_text = gpt_fix_text(default_text, dictionary)
 
-    # ==== タブ ====
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"]
-    )
+    tab1, tab2, tab3, tab4 = st.tabs(["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
     with tab1:
         st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
     with tab2:
-        st.text_area(f"OCRテキスト（ページ {page_num}）", default_text, height=320)
+        st.text_area(f"OCRテキスト（ページ {page_num}）", default_text, height=320, key=f"ocr_{page_num}")
     with tab3:
-        st.text_area(f"GPT補正（ページ {page_num}）", gpt_checked_text, height=320)
+        st.text_area(f"GPT補正（ページ {page_num}）", gpt_checked_text, height=320, key=f"gpt_{page_num}")
     with tab4:
         corrected_text = st.text_area(
             f"手作業修正（ページ {page_num}）", gpt_checked_text, height=320, key=f"edit_{page_num}"
         )
-        if st.button(f"修正を保存 (ページ {page_num})"):
+        if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
             learned = learn_charwise_with_missing(default_text, corrected_text)
             if learned:
                 update_dictionary_and_untrained(learned)
@@ -230,7 +243,6 @@ for page_index in proc_range:
                 st.info("修正が検出されませんでした。")
             st.rerun()
 
-    # 一括ダウンロード用の集約
     all_corrected.append(f"【ページ {page_num}】\n{(corrected_text or gpt_checked_text).strip()}")
 
 # ==== 一括ダウンロード ====
