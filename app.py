@@ -149,8 +149,19 @@ if not pages:
     st.error("ページを生成できませんでした。ファイル形式をご確認ください。")
     st.stop()
 
+# ==== ページ範囲選択（長尺PDF向けの高速化） ====
+total_pages = len(pages)
+start, end = st.slider(
+    "処理するページ範囲を選択（1始まり）",
+    min_value=1, max_value=total_pages, value=(1, min(total_pages, 5))
+)
+proc_range = range(start - 1, end)  # 0始まりのインデックス
+
 # ==== ページごとの処理 ====
-for page_index, page_img in enumerate(pages):
+all_corrected = []
+
+for page_index in proc_range:
+    page_img = pages[page_index]
     page_num = page_index + 1
     st.write(f"## ページ {page_num}")
 
@@ -167,7 +178,8 @@ for page_index, page_img in enumerate(pages):
         poller = client.begin_analyze_document("prebuilt-read", document=buf)
         result = poller.result()
 
-    doc_page = next((p for p in result.pages if p.page_number == page_num), None)
+    # 各ページごとにOCRをかけているため、結果は先頭ページを参照するのが堅牢
+    doc_page = result.pages[0] if getattr(result, "pages", None) else None
     if not doc_page:
         st.warning("OCR結果にページが見つかりませんでした。")
         continue
@@ -199,3 +211,16 @@ for page_index, page_img in enumerate(pages):
             else:
                 st.info("修正が検出されませんでした。")
             st.rerun()
+
+    # 一括ダウンロード用の集約
+    all_corrected.append(f"【ページ {page_num}】\n{(corrected_text or gpt_checked_text).strip()}")
+
+# ==== 一括ダウンロード ====
+if all_corrected:
+    joined = "\n\n".join(all_corrected)
+    st.download_button(
+        "📥 補正テキストを一括ダウンロード",
+        data=joined.encode("utf-8"),
+        file_name="ocr_corrected_all.txt",
+        mime="text/plain"
+    )
