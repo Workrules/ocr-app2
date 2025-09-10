@@ -7,6 +7,7 @@ import time
 import gc
 import re
 import hashlib
+import unicodedata
 from itertools import zip_longest
 from typing import List, Tuple, Dict, Any
 
@@ -205,28 +206,43 @@ def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: 
         imgs.append(pil); nums.append(idx + 1)
     return imgs, nums
 
+# ====== ★ ページ指定の正規化・解析（全角対応） ======
 def parse_page_spec(spec: str, max_pages: int) -> List[int]:
+    """
+    '1,3,5-7' などを 0始まりのインデックスへ。
+    全角数字/カンマ/ハイフン/長音も許可（例：'１，３，５－７' '1ー3' '1—3' '1–3' '1―3'）
+    """
     s = (spec or "").strip()
-    if not s: return []
+    if not s:
+        return []
+    # 全角→半角に正規化
+    s = unicodedata.normalize("NFKC", s)
+    # 日本語カンマなどを半角カンマに、各種ダッシュを半角ハイフンに
+    s = s.replace("，", ",").replace("、", ",")
+    for dash in ["－", "ー", "―", "—", "–"]:
+        s = s.replace(dash, "-")
+    # 分割
     out = set()
     parts = [p.strip() for p in s.split(",") if p.strip()]
     for p in parts:
         if "-" in p:
             a, b = p.split("-", 1)
             try:
-                start = max(1, min(int(a), int(b)))
-                end = min(max_pages, max(int(a), int(b)))
-                for n in range(start, end + 1):
+                ia = int(a); ib = int(b)
+                lo, hi = min(ia, ib), max(ia, ib)
+                lo = max(1, lo); hi = min(max_pages, hi)
+                for n in range(lo, hi + 1):
                     out.add(n - 1)
             except ValueError:
-                pass
+                # 無効トークンは無視
+                continue
         else:
             try:
                 n = int(p)
                 if 1 <= n <= max_pages:
                     out.add(n - 1)
             except ValueError:
-                pass
+                continue
     return sorted(out)
 
 def chunked(seq: List[int], n: int) -> List[List[int]]:
@@ -292,8 +308,8 @@ def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
     bio = io.BytesIO(); doc.save(bio); bio.seek(0)
     return bio.read()
 
-# ===================== UI：ヘッダ =====================
-st.title("📄 Document Intelligence OCR（Azure）— ページ指定 / バッチ / GPT補正 / Word出力 / 状態保持 / ハング防止")
+# ===================== UI =====================
+st.title("📄 Document Intelligence OCR（Azure）— ページ指定/バッチ/GPT/Word/状態保持/ログ強化")
 
 # 診断
 st.sidebar.markdown("### 🔧 環境")
@@ -347,7 +363,6 @@ if "file_bytes" not in st.session_state:
     st.session_state["is_pdf"] = False
     st.session_state["dpi"] = 200
     st.session_state["page_indices"] = []
-    st.session_state["run_params"] = None  # {"dpi":..., "indices":[...]}
     st.session_state["ran"] = False
 
 uploaded = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"], key="uploader")
@@ -361,7 +376,6 @@ if uploaded is not None:
         if k.startswith("ocr_") or k.startswith("gpt_") or k.startswith("edit_"):
             del st.session_state[k]
     st.session_state["page_indices"] = []
-    st.session_state["run_params"] = None
     st.session_state["ran"] = False
 
 file_bytes = st.session_state["file_bytes"]
@@ -372,22 +386,27 @@ if not file_bytes:
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 is_input_pdf = st.session_state["is_pdf"]
 
-# ===================== OCR関数（非ブロッキング・手動ポーリング） =====================
-def _ocr_polling(png_bytes: bytes, timeout_sec: float, log_area=None) -> dict:
-    """Azure LROを自前ポーリング。ハング時はtimeoutで確実に帰る。"""
+# ====== サイドバー：実行ステータス（常時表示で“動いてない”を可視化） ======
+st.sidebar.markdown("### 📊 実行ステータス")
+st.sidebar.write({
+    "ran": bool(st.session_state.get("ran")),
+    "has_file": bool(file_bytes),
+    "is_pdf": bool(is_input_pdf),
+    "saved_indices": st.session_state.get("page_indices", []),
+    "dpi": st.session_state.get("dpi", 200),
+})
+
+# ===================== OCRコア（手動ポーリング） =====================
+def _ocr_polling(png_bytes: bytes, timeout_sec: float) -> dict:
     poller = client.begin_analyze_document("prebuilt-read", document=io.BytesIO(png_bytes))
-    status = st.empty()
     t0 = time.perf_counter()
+    status = st.empty()
     while True:
         if poller.done():
             break
         elapsed = time.perf_counter() - t0
         if elapsed > float(timeout_sec):
-            try:
-                # 明示的キャンセルAPIは無いが、以降このpollerは破棄
-                pass
-            finally:
-                status.empty()
+            status.empty()
             raise TimeoutError(f"Azure OCR timeout after {elapsed:.1f}s")
         status.info(f"Azure OCR 実行中… {elapsed:.1f}s / {timeout_sec:.0f}s")
         time.sleep(0.3)
@@ -421,21 +440,22 @@ def _ocr_dispatch(png_bytes: bytes, timeout_sec: float, use_cache: bool) -> dict
     else:
         return _ocr_polling(png_bytes, timeout_sec)
 
-# ===================== ページ選択（フォーム廃止：常時UI＋実行ボタン） =====================
+# ===================== ページ選択（常時UI＋実行ボタン） =====================
 if is_input_pdf:
     # PDFページ数
     try:
         pdf_for_count = pdfium.PdfDocument(io.BytesIO(file_bytes))
         total_pages = len(pdf_for_count)
+        st.info(f"📘 このPDFは {total_pages} ページあります。")
     except Exception as e:
         st.exception(e); st.stop()
 
-    st.subheader("▶ OCRするページを先に選択")
+    st.subheader("▶ OCRするページを選択")
     col1, col2 = st.columns([2,1])
     with col1:
         select_mode = st.radio(
             "選択方法",
-            options=["全ページ", "範囲指定", "ページ番号指定（例: 1,3,5-7）"],
+            options=["全ページ", "範囲指定", "ページ番号指定（例: 1,3,5-7 / １，３，５－７）"],
             index=1 if total_pages > 1 else 0,
             horizontal=True
         )
@@ -446,31 +466,31 @@ if is_input_pdf:
     if select_mode == "範囲指定" and total_pages > 1:
         start, end = st.slider("処理するページ範囲（1始まり）", 1, total_pages, (1, min(total_pages, 5)))
         chosen_indices = list(range(start - 1, end))
-    elif select_mode == "ページ番号指定（例: 1,3,5-7）":
+    elif select_mode == "ページ番号指定（例: 1,3,5-7 / １，３，５－７）":
         spec_default = "1-3" if total_pages >= 3 else "1"
-        spec = st.text_input("ページ番号（カンマ区切り、範囲はハイフン）", value=spec_default)
+        spec = st.text_input("ページ番号（カンマ区切り、範囲はハイフン。全角OK）", value=spec_default)
         chosen_indices = parse_page_spec(spec, total_pages)
-        if not chosen_indices:
-            st.info("有効なページ番号を入力してください。例: 1,3,5-7")
     else:
         chosen_indices = list(range(total_pages))
 
-    st.caption(f"選択中: {', '.join(str(i+1) for i in chosen_indices)} / DPI={dpi}")
+    st.caption(f"選択中: {', '.join(str(i+1) for i in chosen_indices) if chosen_indices else '(なし)'} / DPI={dpi}")
 
     run_clicked = st.button("▶ この設定でOCRを実行", type="primary")
     if run_clicked:
         st.session_state["page_indices"] = chosen_indices
-        st.session_state["run_params"] = {"dpi": dpi, "indices": chosen_indices}
         st.session_state["ran"] = True
         st.rerun()
 
-    # 実行済みであれば、その設定で処理
+    # 実行済みかチェック
     if not st.session_state.get("ran"):
         st.stop()
 
     chosen_indices = st.session_state.get("page_indices", [])
-    dpi = st.session_state.get("run_params", {}).get("dpi", 200)
+    if not chosen_indices:
+        st.error("選択されたページが空です。『全ページ』に切り替えるか、ページ番号を半角/全角どちらでも良いので正しく入力してください（例：1,3,5-7 / １，３，５－７）。")
+        st.stop()
 
+    dpi = st.session_state.get("dpi", 200)
     EFFECTIVE_BATCH = int(batch_size_override) if batch_size_override else BATCH_SIZE_DEFAULT
     total_to_process = len(chosen_indices)
     progress = st.progress(0.0)
@@ -479,19 +499,20 @@ if is_input_pdf:
     pages_layout: List[Dict[str, Any]] = []
     done = 0
 
-    status_area.info(f"🔄 バッチ処理開始（合計 {total_to_process} ページ / バッチ {EFFECTIVE_BATCH}）")
+    st.write("### ▶ 実行開始")
+    st.write(f"🧪 ページ: {', '.join(str(i+1) for i in chosen_indices)} / DPI={dpi} / バッチ={EFFECTIVE_BATCH}")
 
     for batch_no, batch_indices in enumerate(chunked(chosen_indices, EFFECTIVE_BATCH), start=1):
         status_area.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} （ページ: {', '.join(str(i+1) for i in batch_indices)}）")
         try:
+            st.write(f"🖼 レンダリング開始（{len(batch_indices)}ページ）...")
             pages, page_numbers = render_pdf_selected_pages(file_bytes, batch_indices, dpi=dpi)
+            st.write(f"✅ レンダリング完了: {len(pages)}ページ")
         except Exception as e:
             st.exception(e); st.stop()
 
         for page_img, page_num in zip(pages, page_numbers):
             st.write(f"## ページ {page_num}")
-            dbg = st.expander("🔍 実行ログ", expanded=debug_log)
-            dbg.write("step: 画像前処理（赤判子除去）")
             clean_img = remove_red_stamp(page_img)
             st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
 
@@ -504,18 +525,14 @@ if is_input_pdf:
                 except Exception as e:
                     st.error(f"OCRに失敗：{e}")
                     st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
-                    if debug_log: dbg.exception(e)
                     continue
                 elapsed = time.perf_counter() - t0
                 st.caption(f"OCR実行時間: {elapsed:.1f}s")
-                dbg.write(f"step: Azure応答 取得済 / {elapsed:.2f}s")
 
             azure_lines = cached.get("lines") or []
             default_text = "\n".join([ln["content"] for ln in azure_lines]) if azure_lines else (cached.get("raw") or "")
-            dbg.write(f"step: テキスト生成 lines={len(azure_lines)} chars={len(default_text)}")
             if not default_text.strip():
                 st.warning("OCRは成功しましたがテキストが空でした。DPIや画像品質を見直してください。")
-                if debug_log: dbg.json(cached)
 
             dictionary = load_json_any(DICT_FILE)
             gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
@@ -540,7 +557,6 @@ if is_input_pdf:
                     if learned:
                         update_dictionary_and_untrained(learned)
                         st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
-                        if debug_log: dbg.write(f"学習追加: {len(learned)} 件")
                     else:
                         st.info("修正が検出されませんでした。")
 
@@ -564,7 +580,6 @@ if is_input_pdf:
             })
 
             done += 1; progress.progress(done / total_to_process)
-            if debug_log: dbg.write("step: ページ完了")
 
         del pages, page_numbers
         gc.collect()
@@ -614,8 +629,6 @@ else:
 
     for page_img, page_num in zip(pages, page_numbers):
         st.write(f"## ページ {page_num}")
-        dbg = st.expander("🔍 実行ログ", expanded=debug_log)
-        dbg.write("step: 画像前処理（赤判子除去）")
         clean_img = remove_red_stamp(page_img)
         st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
 
@@ -628,18 +641,14 @@ else:
             except Exception as e:
                 st.error(f"OCRに失敗：{e}")
                 st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
-                if debug_log: dbg.exception(e)
                 continue
             elapsed = time.perf_counter() - t0
             st.caption(f"OCR実行時間: {elapsed:.1f}s")
-            dbg.write(f"step: Azure応答 取得済 / {elapsed:.2f}s")
 
         azure_lines = cached.get("lines") or []
         default_text = "\n".join([ln["content"] for ln in azure_lines]) if azure_lines else (cached.get("raw") or "")
-        dbg.write(f"step: テキスト生成 lines={len(azure_lines)} chars={len(default_text)}")
         if not default_text.strip():
             st.warning("OCRは成功しましたがテキストが空でした。DPIや画像品質を見直してください。")
-            if debug_log: dbg.json(cached)
 
         dictionary = load_json_any(DICT_FILE)
         gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
@@ -660,7 +669,6 @@ else:
                 if learned:
                     update_dictionary_and_untrained(learned)
                     st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
-                    if debug_log: dbg.write(f"学習追加: {len(learned)} 件")
                 else:
                     st.info("修正が検出されませんでした。")
 
