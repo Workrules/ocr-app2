@@ -356,6 +356,9 @@ st.sidebar.markdown("### 🛠 デバッグ")
 skip_gpt = st.sidebar.checkbox("GPT補正をスキップ", value=False)
 ocr_timeout = st.sidebar.slider("OCRタイムアウト（秒）", 10, 180, 60, step=5)
 batch_size_override = st.sidebar.number_input("バッチサイズ上書き", 1, 20, value=BATCH_SIZE_DEFAULT)
+# デバッグUI の直下に追加
+use_cache = st.sidebar.checkbox("OCRキャッシュを使う（実験的）", value=False)
+
 
 # --- サイドバー：辞書プレビュー（ボタンで読み直し） ---
 dict_preview_box = st.sidebar.container()
@@ -400,14 +403,14 @@ if not file_bytes:
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 is_input_pdf = st.session_state["is_pdf"]
 
-# ===================== OCRキャッシュ =====================
-@st.cache_data(show_spinner=False)
-def _ocr_read_cached(png_digest: str, png_bytes: bytes, timeout_sec: float):
+# ===================== OCR関数：キャッシュ無し / あり =====================
+def _ocr_read_once(png_bytes: bytes, timeout_sec: float) -> dict:
+    """毎回Azureに投げる素直なOCR。デバッグ安定用。"""
     poller = client.begin_analyze_document("prebuilt-read", document=io.BytesIO(png_bytes))
     result = poller.result(timeout=float(timeout_sec))
     doc_page = result.pages[0] if getattr(result, "pages", None) else None
     if not doc_page:
-        return {"pw": 1.0, "ph": 1.0, "lines": []}
+        return {"pw": 1.0, "ph": 1.0, "lines": [], "raw": getattr(result, "content", "")}
 
     lines = []
     for ln in getattr(doc_page, "lines", []) or []:
@@ -418,7 +421,13 @@ def _ocr_read_cached(png_digest: str, png_bytes: bytes, timeout_sec: float):
         "pw": float(getattr(doc_page, "width", 1.0) or 1.0),
         "ph": float(getattr(doc_page, "height", 1.0) or 1.0),
         "lines": lines,
+        "raw": getattr(result, "content", "") or "\n".join([l["content"] for l in lines]),
     }
+
+@st.cache_data(show_spinner=False)
+def _ocr_read_cached(png_digest: str, png_bytes: bytes, timeout_sec: float) -> dict:
+    """引数そのままをキーにキャッシュ。うまく行かない時は use_cache=False に。"""
+    return _ocr_read_once(png_bytes, timeout_sec)
 
 # ===================== PDF：OCR前にページ指定（保持） =====================
 if is_input_pdf:
@@ -486,22 +495,23 @@ if is_input_pdf:
             buf = io.BytesIO(); clean_img.save(buf, format="PNG"); png_bytes = buf.getvalue()
             png_digest = hashlib.md5(png_bytes).hexdigest()
 
-            with st.spinner("OCRを実行中..."):
-                t0 = time.perf_counter()
-                try:
-                    cached = _ocr_read_cached(png_digest, png_bytes, ocr_timeout)
-                except Exception as e:
-                    st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
-                    st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
-                    continue
-                st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+  with st.spinner("OCRを実行中..."):
+    t0 = time.perf_counter()
+    try:
+        if use_cache:
+            cached = _ocr_read_cached(png_digest, png_bytes, ocr_timeout)
+        else:
+            cached = _ocr_read_once(png_bytes, ocr_timeout)
+    except Exception as e:
+        st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
+        st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+        continue
+    st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
 
-            azure_lines_slim = cached["lines"]
-            default_text = "\n".join([ln["content"] for ln in azure_lines_slim])
-
-            # 共有辞書を毎回最新で読みつつ、必要に応じてGPT補正
-            dictionary = load_json_any(DICT_FILE)
-            gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
+azure_lines_slim = cached["lines"]
+default_text = "\n".join([ln["content"] for ln in azure_lines_slim]) if azure_lines_slim else (cached.get("raw") or "")
+if not default_text.strip():
+    st.warning("OCRは成功しましたがテキストが空でした。画像の解像度/DPIや赤ハンコ除去を見直してください。")
 
             # --- セッションキー ---
             ocr_key = f"ocr_{page_num}"
