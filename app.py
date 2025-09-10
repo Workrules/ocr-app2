@@ -25,7 +25,6 @@ from docx import Document
 from docx.shared import Cm, Pt
 
 # ===================== 基本設定 =====================
-# Azure Document Intelligence / OpenAI
 AZURE_DOCINT_ENDPOINT = os.getenv("AZURE_DOCINT_ENDPOINT") or st.secrets.get("AZURE_DOCINT_ENDPOINT")
 AZURE_DOCINT_KEY = os.getenv("AZURE_DOCINT_KEY") or st.secrets.get("AZURE_DOCINT_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
@@ -47,7 +46,6 @@ JP_CHAR_RE = re.compile(r"^[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]$")
 STORAGE_BACKEND = os.getenv("OCR_DICT_BACKEND") or st.secrets.get("OCR_DICT_BACKEND", "local")
 
 if STORAGE_BACKEND == "azureblob":
-    # Azure Blob Storage を使用
     try:
         from azure.storage.blob import BlobServiceClient, ContentSettings
         from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
@@ -67,20 +65,16 @@ if STORAGE_BACKEND == "azureblob":
     try:
         _container.create_container()
     except ResourceExistsError:
-        pass  # 既存ならOK
+        pass
 
-    # Blob名（固定）
     DICT_FILE = "ocr_char_corrections.json"
     UNTRAINED_FILE = "untrained_confusions.json"
     TRAINED_FILE = "trained_confusions.json"
 
-    # Blob I/O
     def _load_json_blob(blob_name: str) -> dict:
         try:
             data = _container.download_blob(blob_name).readall()
             return json.loads(data.decode("utf-8"))
-        except ResourceNotFoundError:
-            return {}
         except Exception:
             return {}
 
@@ -100,7 +94,6 @@ if STORAGE_BACKEND == "azureblob":
         _save_json_blob(obj, key)
 
 elif STORAGE_BACKEND == "local":
-    # ローカルJSON
     DICT_DIR = os.getenv("OCR_DICT_DIR") or st.secrets.get("OCR_DICT_DIR", ".")
     DICT_FILE = os.path.join(DICT_DIR, "ocr_char_corrections.json")
     UNTRAINED_FILE = os.path.join(DICT_DIR, "untrained_confusions.json")
@@ -122,8 +115,7 @@ elif STORAGE_BACKEND == "local":
         tmp_path = f"{path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
+            f.flush(); os.fsync(f.fileno())
         os.replace(tmp_path, path)
 
     def load_json_any(key: str) -> dict:
@@ -138,7 +130,6 @@ else:
 
 # ===================== ユーティリティ =====================
 def remove_red_stamp(img_pil: Image.Image) -> Image.Image:
-    """赤い印影を白に飛ばす簡易フィルタ"""
     img = np.array(img_pil)
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
     lower_red1 = np.array([0, 70, 50]); upper_red1 = np.array([10, 255, 255])
@@ -149,7 +140,6 @@ def remove_red_stamp(img_pil: Image.Image) -> Image.Image:
     return Image.fromarray(img)
 
 def learn_charwise_with_missing(original: str, corrected: str) -> dict:
-    """文字単位の差分から「誤→正」を学習（欠落は '□' として扱う）"""
     learned: Dict[str, Dict[str, Any]] = {}
     import difflib
     sm = difflib.SequenceMatcher(None, original, corrected)
@@ -164,7 +154,6 @@ def learn_charwise_with_missing(original: str, corrected: str) -> dict:
     return learned
 
 def update_dictionary_and_untrained(learned: dict):
-    # メイン辞書
     dictionary = load_json_any(DICT_FILE)
     for w, meta in learned.items():
         if w in dictionary:
@@ -176,14 +165,12 @@ def update_dictionary_and_untrained(learned: dict):
         else:
             dictionary[w] = meta
     save_json_any(dictionary, DICT_FILE)
-    # 未学習候補
     untrained = load_json_any(UNTRAINED_FILE)
     for w, meta in learned.items():
         untrained[w] = meta["right"]
     save_json_any(untrained, UNTRAINED_FILE)
 
 def gpt_fix_text(text: str, dictionary: dict) -> str:
-    """GPTで最小限に整形（temperature等は未指定：gpt-5既定値で実行）"""
     prompt = f"""
 次のOCR結果を自然な日本語に直してください。
 - 日本語に存在しない文字は「□」にしてください。
@@ -206,8 +193,7 @@ OCR結果:
         for item in getattr(resp, "output", []) or []:
             for part in getattr(item, "content", []) or []:
                 t = getattr(part, "text", None)
-                if t:
-                    out_parts.append(t)
+                if t: out_parts.append(t)
         out = "".join(out_parts).strip()
         return out or text
     except Exception as e:
@@ -219,7 +205,6 @@ def is_pdf(b: bytes) -> bool:
     return len(b) >= 5 and b[:5] == b"%PDF-"
 
 def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: int = 200) -> Tuple[List[Image.Image], List[int]]:
-    """選択ページ（0始まり）だけレンダリングして返す。戻りのpage_numbersは1始まり。"""
     imgs: List[Image.Image] = []
     nums: List[int] = []
     pdf = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
@@ -231,10 +216,8 @@ def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: 
     return imgs, nums
 
 def parse_page_spec(spec: str, max_pages: int) -> List[int]:
-    """'1,3,5-7' → 0始まりの昇順インデックス配列（範囲外クリップ・重複排除）"""
     s = (spec or "").strip()
-    if not s:
-        return []
+    if not s: return []
     out = set()
     parts = [p.strip() for p in s.split(",") if p.strip()]
     for p in parts:
@@ -246,14 +229,14 @@ def parse_page_spec(spec: str, max_pages: int) -> List[int]:
                 for n in range(start, end + 1):
                     out.add(n - 1)
             except ValueError:
-                continue
+                pass
         else:
             try:
                 n = int(p)
                 if 1 <= n <= max_pages:
                     out.add(n - 1)
             except ValueError:
-                continue
+                pass
     return sorted(out)
 
 def chunked(seq: List[int], n: int) -> List[List[int]]:
@@ -262,8 +245,7 @@ def chunked(seq: List[int], n: int) -> List[List[int]]:
 # ========== Azure行の座標（左x/上y） ==========
 def line_xy(line_obj: Any) -> Tuple[float, float]:
     poly = getattr(line_obj, "polygon", None) or getattr(line_obj, "bounding_polygon", None)
-    if not poly:
-        return (0.0, 0.0)
+    if not poly: return (0.0, 0.0)
     xs, ys = [], []
     for p in poly:
         x = getattr(p, "x", None); y = getattr(p, "y", None)
@@ -272,7 +254,7 @@ def line_xy(line_obj: Any) -> Tuple[float, float]:
         xs.append(float(x)); ys.append(float(y))
     return (min(xs or [0.0]), min(ys or [0.0]))
 
-# ========== Word（docx）生成（左インデント近似のみ） ==========
+# ========== Word生成 ==========
 EMU_PER_CM = 360000.0
 def to_cm(val) -> float:
     try:
@@ -357,8 +339,9 @@ skip_gpt = st.sidebar.checkbox("GPT補正をスキップ", value=False)
 ocr_timeout = st.sidebar.slider("OCRタイムアウト（秒）", 10, 180, 60, step=5)
 batch_size_override = st.sidebar.number_input("バッチサイズ上書き", 1, 20, value=BATCH_SIZE_DEFAULT)
 use_cache = st.sidebar.checkbox("OCRキャッシュを使う（実験的）", value=False)
+debug_log = st.sidebar.checkbox("🔍 詳細ログを表示", value=True)
 
-# --- サイドバー：辞書プレビュー（ボタンで読み直し） ---
+# 辞書プレビュー（手動再読込）
 dict_preview_box = st.sidebar.container()
 with dict_preview_box:
     st.subheader("📖 現在の辞書（プレビュー）")
@@ -368,7 +351,7 @@ if st.sidebar.button("🔄 辞書プレビューを再読込", type="secondary")
         st.subheader("📖 現在の辞書（プレビュー）")
         st.json(load_json_any(DICT_FILE))
 
-# ===================== アップロードを状態保持 =====================
+# ===================== アップロード保持 =====================
 if "file_bytes" not in st.session_state:
     st.session_state["file_bytes"] = None
     st.session_state["file_name"] = None
@@ -384,7 +367,6 @@ if uploaded is not None:
     st.session_state["file_name"] = uploaded.name
     st.session_state["file_mime"] = uploaded.type
     st.session_state["is_pdf"] = (uploaded.type == "application/pdf") or uploaded.name.lower().endswith(".pdf")
-    # 新ファイル投入時は関連状態をリセット
     for k in list(st.session_state.keys()):
         if k.startswith("ocr_cache_"): del st.session_state[k]
         if k.startswith("ocr_") or k.startswith("gpt_") or k.startswith("edit_"):
@@ -401,20 +383,17 @@ if not file_bytes:
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 is_input_pdf = st.session_state["is_pdf"]
 
-# ===================== OCR関数：キャッシュ無し / あり =====================
+# ===================== OCR関数（キャッシュOFF/ON） =====================
 def _ocr_read_once(png_bytes: bytes, timeout_sec: float) -> dict:
-    """毎回Azureに投げる素直なOCR。デバッグ安定用。"""
     poller = client.begin_analyze_document("prebuilt-read", document=io.BytesIO(png_bytes))
     result = poller.result(timeout=float(timeout_sec))
     doc_page = result.pages[0] if getattr(result, "pages", None) else None
     if not doc_page:
         return {"pw": 1.0, "ph": 1.0, "lines": [], "raw": getattr(result, "content", "")}
-
     lines = []
     for ln in getattr(doc_page, "lines", []) or []:
         x, y = line_xy(ln)
         lines.append({"content": ln.content, "x": float(x), "y": float(y)})
-
     return {
         "pw": float(getattr(doc_page, "width", 1.0) or 1.0),
         "ph": float(getattr(doc_page, "height", 1.0) or 1.0),
@@ -424,10 +403,9 @@ def _ocr_read_once(png_bytes: bytes, timeout_sec: float) -> dict:
 
 @st.cache_data(show_spinner=False)
 def _ocr_read_cached(png_digest: str, png_bytes: bytes, timeout_sec: float) -> dict:
-    """引数そのままをキーにキャッシュ。うまく行かない時は use_cache=False に。"""
     return _ocr_read_once(png_bytes, timeout_sec)
 
-# ===================== PDF：OCR前にページ指定（保持） =====================
+# ===================== PDF：ページ指定（保持） =====================
 if is_input_pdf:
     try:
         pdf_for_count = pdfium.PdfDocument(io.BytesIO(file_bytes))
@@ -475,23 +453,30 @@ if is_input_pdf:
     total_to_process = len(chosen_indices)
     progress = st.progress(0.0)
     status = st.empty()
-    all_corrected_texts: List[str] = []      # TXT用（ページ見出しなし）
-    pages_layout: List[Dict[str, Any]] = []  # Word用
+    all_corrected_texts: List[str] = []
+    pages_layout: List[Dict[str, Any]] = []
     done = 0
 
+    st.caption(f"🧪 選択ページ: {', '.join(str(i+1) for i in chosen_indices)} / DPI={dpi} / バッチ={EFFECTIVE_BATCH}")
+
     for batch_no, batch_indices in enumerate(chunked(chosen_indices, EFFECTIVE_BATCH), start=1):
-        status.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} を処理中（ページ: {', '.join(str(i+1) for i in batch_indices)}）")
+        status.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} （ページ: {', '.join(str(i+1) for i in batch_indices)}）")
         try:
             pages, page_numbers = render_pdf_selected_pages(file_bytes, batch_indices, dpi=dpi)
+            if debug_log: st.write(f"🖼️ レンダリング完了: {len(pages)} ページ")
         except Exception as e:
             st.exception(e); st.stop()
 
         for page_img, page_num in zip(pages, page_numbers):
             st.write(f"## ページ {page_num}")
+            dbg = st.expander("🔍 実行ログ", expanded=debug_log)
+            dbg.write("step: 画像前処理（赤判子除去）")
             clean_img = remove_red_stamp(page_img)
+            st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
 
             buf = io.BytesIO(); clean_img.save(buf, format="PNG"); png_bytes = buf.getvalue()
             png_digest = hashlib.md5(png_bytes).hexdigest()
+            dbg.write(f"step: OCR呼び出し → use_cache={use_cache}")
 
             with st.spinner("OCRを実行中..."):
                 t0 = time.perf_counter()
@@ -503,15 +488,21 @@ if is_input_pdf:
                 except Exception as e:
                     st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
                     st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+                    if debug_log: dbg.exception(e)
                     continue
-                st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+                elapsed = time.perf_counter() - t0
+                st.caption(f"OCR実行時間: {elapsed:.1f}s")
+                dbg.write(f"step: Azure応答 取得済 / {elapsed:.2f}s")
 
-            azure_lines_slim = cached["lines"]
+            azure_lines_slim = cached.get("lines") or []
             default_text = "\n".join([ln["content"] for ln in azure_lines_slim]) if azure_lines_slim else (cached.get("raw") or "")
+            dbg.write(f"step: テキスト生成 lines={len(azure_lines_slim)} chars={len(default_text)}")
+
             if not default_text.strip():
                 st.warning("OCRは成功しましたがテキストが空でした。DPIや画像品質を見直してください。")
+                if debug_log:
+                    dbg.json(cached)
 
-            # 共有辞書を毎回最新で読みつつ、必要に応じてGPT補正
             dictionary = load_json_any(DICT_FILE)
             gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
 
@@ -520,7 +511,6 @@ if is_input_pdf:
             gpt_key = f"gpt_{page_num}"
             edit_key = f"edit_{page_num}"
 
-            # 初期化（初回だけ）
             if ocr_key not in st.session_state:
                 st.session_state[ocr_key] = default_text
             if gpt_key not in st.session_state:
@@ -528,10 +518,7 @@ if is_input_pdf:
             if edit_key not in st.session_state:
                 st.session_state[edit_key] = gpt_checked_text
 
-            # ビュータブ（valueは渡さず key のみ）
-            tab1, tab2, tab3, tab4 = st.tabs(["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
-            with tab1:
-                st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
+            tab2, tab3, tab4 = st.tabs(["🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
             with tab2:
                 st.text_area(f"OCRテキスト（ページ {page_num}）", height=320, key=ocr_key)
             with tab3:
@@ -544,11 +531,11 @@ if is_input_pdf:
                     if learned:
                         update_dictionary_and_untrained(learned)
                         st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
+                        if debug_log: dbg.write(f"学習追加: {len(learned)} 件")
                     else:
                         st.info("修正が検出されませんでした。")
-                    # rerunしない（状態保持で復元）
+                    # rerunしない
 
-            # TXT（ページ見出しなしで連結：セッションを優先）
             final_text_page = (
                 st.session_state.get(edit_key)
                 or st.session_state.get(gpt_key)
@@ -557,7 +544,6 @@ if is_input_pdf:
             ).strip()
             all_corrected_texts.append(final_text_page)
 
-            # Word用レイアウト：セッションの編集結果を優先
             gpt_lines = final_text_page.splitlines()
             lines_for_layout = []
             for i, ln in enumerate(azure_lines_slim):
@@ -574,13 +560,13 @@ if is_input_pdf:
             pages_layout.append(page_layout_info)
 
             done += 1; progress.progress(done / total_to_process)
+            if debug_log: dbg.write("step: ページ完了")
 
         del pages, page_numbers
         gc.collect()
 
     status.success("✅ すべてのページの処理が完了しました。")
 
-    # ダウンロード
     if all_corrected_texts:
         joined_txt = "\n\n".join(all_corrected_texts)
         st.download_button(
@@ -621,10 +607,14 @@ else:
 
     for page_img, page_num in zip(pages, page_numbers):
         st.write(f"## ページ {page_num}")
+        dbg = st.expander("🔍 実行ログ", expanded=debug_log)
+        dbg.write("step: 画像前処理（赤判子除去）")
         clean_img = remove_red_stamp(page_img)
+        st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
 
         buf = io.BytesIO(); clean_img.save(buf, format="PNG"); png_bytes = buf.getvalue()
         png_digest = hashlib.md5(png_bytes).hexdigest()
+        dbg.write(f"step: OCR呼び出し → use_cache={use_cache}")
 
         with st.spinner("OCRを実行中..."):
             t0 = time.perf_counter()
@@ -636,18 +626,22 @@ else:
             except Exception as e:
                 st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
                 st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+                if debug_log: dbg.exception(e)
                 continue
-            st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+            elapsed = time.perf_counter() - t0
+            st.caption(f"OCR実行時間: {elapsed:.1f}s")
+            dbg.write(f"step: Azure応答 取得済 / {elapsed:.2f}s")
 
-        azure_lines_slim = cached["lines"]
+        azure_lines_slim = cached.get("lines") or []
         default_text = "\n".join([ln["content"] for ln in azure_lines_slim]) if azure_lines_slim else (cached.get("raw") or "")
+        dbg.write(f"step: テキスト生成 lines={len(azure_lines_slim)} chars={len(default_text)}")
         if not default_text.strip():
             st.warning("OCRは成功しましたがテキストが空でした。DPIや画像品質を見直してください。")
+            if debug_log: dbg.json(cached)
 
         dictionary = load_json_any(DICT_FILE)
         gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
 
-        # --- セッションキー ---
         ocr_key = f"ocr_{page_num}"
         gpt_key = f"gpt_{page_num}"
         edit_key = f"edit_{page_num}"
@@ -659,9 +653,7 @@ else:
         if edit_key not in st.session_state:
             st.session_state[edit_key] = gpt_checked_text
 
-        tab1, tab2, tab3, tab4 = st.tabs(["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
-        with tab1:
-            st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
+        tab2, tab3, tab4 = st.tabs(["🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
         with tab2:
             st.text_area(f"OCRテキスト（ページ {page_num}）", height=320, key=ocr_key)
         with tab3:
@@ -674,11 +666,10 @@ else:
                 if learned:
                     update_dictionary_and_untrained(learned)
                     st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
+                    if debug_log: dbg.write(f"学習追加: {len(learned)} 件")
                 else:
                     st.info("修正が検出されませんでした。")
-                # rerunしない
 
-        # TXT
         final_text_page = (
             st.session_state.get(edit_key)
             or st.session_state.get(gpt_key)
@@ -687,7 +678,6 @@ else:
         ).strip()
         all_corrected_texts.append(final_text_page)
 
-        # Word
         gpt_lines = final_text_page.splitlines()
         lines_for_layout = []
         for i, ln in enumerate(azure_lines_slim):
