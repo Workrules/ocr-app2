@@ -358,6 +358,9 @@ batch_size_override = st.sidebar.number_input("バッチサイズ上書き", 1, 
 # 現在の辞書プレビュー
 dictionary_preview = load_json_any(DICT_FILE)
 st.sidebar.subheader("📖 現在の辞書（プレビュー）")
+# サイドバー：プレビュー更新ボタン（任意）
+if st.sidebar.button("🔄 辞書プレビューを更新"):
+    st.experimental_rerun()
 st.sidebar.json(dictionary_preview)
 
 # ファイル入力
@@ -592,44 +595,30 @@ else:
         gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
 
         # --- セッションキー ---
-        ocr_key = f"ocr_{page_num}"
-        gpt_key = f"gpt_{page_num}"
-        edit_key = f"edit_{page_num}"
+# --- セッションキー ---
+ocr_key = f"ocr_{page_num}"
+gpt_key = f"gpt_{page_num}"
+edit_key = f"edit_{page_num}"
 
-        if ocr_key not in st.session_state:
-            st.session_state[ocr_key] = default_text
-        if gpt_key not in st.session_state:
-            st.session_state[gpt_key] = gpt_checked_text
-        if edit_key not in st.session_state:
-            st.session_state[edit_key] = gpt_checked_text
+# 初期化（初回だけ）
+if ocr_key not in st.session_state:
+    st.session_state[ocr_key] = default_text
+if gpt_key not in st.session_state:
+    st.session_state[gpt_key] = gpt_checked_text
+if edit_key not in st.session_state:
+    st.session_state[edit_key] = gpt_checked_text
 
-        tab1, tab2, tab3, tab4 = st.tabs(["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
-        with tab1:
-            st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
-        with tab2:
-            st.text_area(
-                f"OCRテキスト（ページ {page_num}）",
-                value=st.session_state.get(ocr_key, default_text),
-                height=320,
-                key=ocr_key
-            )
-        with tab3:
-            st.text_area(
-                f"GPT補正（ページ {page_num}）",
-                value=st.session_state.get(gpt_key, gpt_checked_text),
-                height=320,
-                key=gpt_key
-            )
-        with tab4:
-            st.text_area(
-                f"手作業修正（ページ {page_num}）",
-                value=st.session_state.get(edit_key, gpt_checked_text),
-                height=320,
-                key=edit_key
-            )
-            if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
-                corrected_text_current = st.session_state.get(edit_key, gpt_checked_text)
-                learned = learn_charwise_with_missing(default_text, corrected_text_current)
+# ここを「value=... を渡さず key だけ」にする
+st.text_area(f"OCRテキスト（ページ {page_num}）", height=320, key=ocr_key)
+st.text_area(f"GPT補正（ページ {page_num}）", height=320, key=gpt_key)
+st.text_area(f"手作業修正（ページ {page_num}）", height=320, key=edit_key)
+
+# 保存ボタンでは session_state から読む
+if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
+    corrected_text_current = st.session_state.get(edit_key, gpt_checked_text)
+    learned = learn_charwise_with_missing(default_text, corrected_text_current)
+    ...
+
                 if learned:
                     update_dictionary_and_untrained(learned)
                     st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
