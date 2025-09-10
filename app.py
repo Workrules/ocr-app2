@@ -475,21 +475,33 @@ if is_input_pdf:
 
     st.caption(f"選択中: {', '.join(str(i+1) for i in chosen_indices) if chosen_indices else '(なし)'} / DPI={dpi}")
 
-    run_clicked = st.button("▶ この設定でOCRを実行", type="primary")
-   # 1) クリックされたか、過去に実行済み（ran=True）なら走る
-# 2) さらに、page_indices が空なら今回の chosen_indices を採用
-if (run_clicked or st.session_state.get("ran")) and chosen_indices:
-    if not st.session_state.get("page_indices"):
-        st.session_state["page_indices"] = chosen_indices
+run_clicked = st.button("▶ この設定でOCRを実行", type="primary", key="run_pdf")
+
+# クリックされたら実行フラグとページを保存
+if run_clicked:
+    st.session_state["page_indices"] = chosen_indices
     st.session_state["ran"] = True
-else:
-    # 選択が空 or まだ実行ボタンが押されていない
+
+# まだ実行されていない場合はここで明示停止（対応するelseを作らない形にして構文崩れを防止）
+if not st.session_state.get("ran"):
     if not chosen_indices:
-        st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入れてください。")
+        st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入力してください。")
     else:
         st.warning("実行待ちです。『▶ この設定でOCRを実行』を押してください。")
     st.stop()
 
+# ran=True だが保存済みのページ配列が空なら、今回の選択を採用（それも空なら停止）
+if not st.session_state.get("page_indices"):
+    if chosen_indices:
+        st.session_state["page_indices"] = chosen_indices
+    else:
+        st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入力してください。")
+        st.stop()
+
+# 以降、この実行で使うページ指定を固定
+chosen_indices = st.session_state["page_indices"]
+
+# ここから先は従来どおり
     dpi = st.session_state.get("dpi", 200)
     EFFECTIVE_BATCH = int(batch_size_override) if batch_size_override else BATCH_SIZE_DEFAULT
     total_to_process = len(chosen_indices)
