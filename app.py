@@ -46,7 +46,7 @@ STORAGE_BACKEND = os.getenv("OCR_DICT_BACKEND") or st.secrets.get("OCR_DICT_BACK
 if STORAGE_BACKEND == "azureblob":
     try:
         from azure.storage.blob import BlobServiceClient, ContentSettings
-        from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
+        from azure.core.exceptions import ResourceExistsError
     except Exception as e:
         st.error(f"azure-storage-blob が必要です。requirements.txt に追加してください。詳細: {e}")
         st.stop()
@@ -84,6 +84,7 @@ if STORAGE_BACKEND == "azureblob":
 
     def load_json_any(key: str) -> dict:
         return _load_json_blob(key)
+
     def save_json_any(obj: dict, key: str):
         _save_json_blob(obj, key)
 
@@ -114,6 +115,7 @@ elif STORAGE_BACKEND == "local":
 
     def load_json_any(key: str) -> dict:
         return _load_json_local(key)
+
     def save_json_any(obj: dict, key: str):
         _save_json_local(obj, key)
 else:
@@ -156,6 +158,7 @@ def update_dictionary_and_untrained(learned: dict):
         else:
             dictionary[w] = meta
     save_json_any(dictionary, DICT_FILE)
+
     untrained = load_json_any(UNTRAINED_FILE)
     for w, meta in learned.items():
         untrained[w] = meta["right"]
@@ -206,22 +209,19 @@ def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: 
         imgs.append(pil); nums.append(idx + 1)
     return imgs, nums
 
-# ====== ★ ページ指定の正規化・解析（全角対応） ======
+# ====== ページ指定の正規化・解析（全角対応） ======
 def parse_page_spec(spec: str, max_pages: int) -> List[int]:
     """
-    '1,3,5-7' などを 0始まりのインデックスへ。
-    全角数字/カンマ/ハイフン/長音も許可（例：'１，３，５－７' '1ー3' '1—3' '1–3' '1―3'）
+    '1,3,5-7' を 0始まりインデックスへ。
+    全角数字/カンマ/ハイフン/長音も許可（'１，３，５－７' '1ー3' '1—3' など）
     """
     s = (spec or "").strip()
     if not s:
         return []
-    # 全角→半角に正規化
     s = unicodedata.normalize("NFKC", s)
-    # 日本語カンマなどを半角カンマに、各種ダッシュを半角ハイフンに
     s = s.replace("，", ",").replace("、", ",")
     for dash in ["－", "ー", "―", "—", "–"]:
         s = s.replace(dash, "-")
-    # 分割
     out = set()
     parts = [p.strip() for p in s.split(",") if p.strip()]
     for p in parts:
@@ -234,7 +234,6 @@ def parse_page_spec(spec: str, max_pages: int) -> List[int]:
                 for n in range(lo, hi + 1):
                     out.add(n - 1)
             except ValueError:
-                # 無効トークンは無視
                 continue
         else:
             try:
@@ -371,7 +370,7 @@ if uploaded is not None:
     st.session_state["file_name"] = uploaded.name
     st.session_state["file_mime"] = uploaded.type
     st.session_state["is_pdf"] = (uploaded.type == "application/pdf") or uploaded.name.lower().endswith(".pdf")
-    # 既存状態の初期化
+    # 状態初期化
     for k in list(st.session_state.keys()):
         if k.startswith("ocr_") or k.startswith("gpt_") or k.startswith("edit_"):
             del st.session_state[k]
@@ -386,7 +385,7 @@ if not file_bytes:
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 is_input_pdf = st.session_state["is_pdf"]
 
-# ====== サイドバー：実行ステータス（常時表示で“動いてない”を可視化） ======
+# ====== サイドバー：実行ステータス ======
 st.sidebar.markdown("### 📊 実行ステータス")
 st.sidebar.write({
     "ran": bool(st.session_state.get("ran")),
@@ -396,7 +395,7 @@ st.sidebar.write({
     "dpi": st.session_state.get("dpi", 200),
 })
 
-# ===================== OCRコア（手動ポーリング） =====================
+# ===================== OCRコア（自前ポーリング） =====================
 def _ocr_polling(png_bytes: bytes, timeout_sec: float) -> dict:
     poller = client.begin_analyze_document("prebuilt-read", document=io.BytesIO(png_bytes))
     t0 = time.perf_counter()
@@ -475,34 +474,32 @@ if is_input_pdf:
 
     st.caption(f"選択中: {', '.join(str(i+1) for i in chosen_indices) if chosen_indices else '(なし)'} / DPI={dpi}")
 
-run_clicked = st.button("▶ この設定でOCRを実行", type="primary", key="run_pdf")
+    # 実行ボタン（キー固定）
+    run_clicked = st.button("▶ この設定でOCRを実行", type="primary", key="run_pdf")
 
-# クリックされたら実行フラグとページを保存
-if run_clicked:
-    st.session_state["page_indices"] = chosen_indices
-    st.session_state["ran"] = True
-
-# まだ実行されていない場合はここで明示停止（対応するelseを作らない形にして構文崩れを防止）
-if not st.session_state.get("ran"):
-    if not chosen_indices:
-        st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入力してください。")
-    else:
-        st.warning("実行待ちです。『▶ この設定でOCRを実行』を押してください。")
-    st.stop()
-
-# ran=True だが保存済みのページ配列が空なら、今回の選択を採用（それも空なら停止）
-if not st.session_state.get("page_indices"):
-    if chosen_indices:
+    # --- 強制実行ロジック（else を使わず構文崩れ防止） ---
+    if run_clicked:
         st.session_state["page_indices"] = chosen_indices
-    else:
-        st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入力してください。")
+        st.session_state["ran"] = True
+
+    if not st.session_state.get("ran"):
+        if not chosen_indices:
+            st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入力してください。")
+        else:
+            st.warning("実行待ちです。『▶ この設定でOCRを実行』を押してください。")
         st.stop()
 
-# 以降、この実行で使うページ指定を固定
-chosen_indices = st.session_state["page_indices"]
+    if not st.session_state.get("page_indices"):
+        if chosen_indices:
+            st.session_state["page_indices"] = chosen_indices
+        else:
+            st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入力してください。")
+            st.stop()
 
-# ここから先は従来どおり
-    dpi = st.session_state.get("dpi", 200)
+    # 以降、この実行で使うページ指定を固定
+    chosen_indices = st.session_state["page_indices"]
+
+    # ===== 実行本体 =====
     EFFECTIVE_BATCH = int(batch_size_override) if batch_size_override else BATCH_SIZE_DEFAULT
     total_to_process = len(chosen_indices)
     progress = st.progress(0.0)
@@ -631,10 +628,9 @@ else:
         st.exception(e); st.stop()
 
     st.caption("単一画像としてOCRします。")
-    run_img = st.button("▶ この画像でOCRを実行", type="primary")
-    if not run_img and not st.session_state.get("ran"):
+    run_img = st.button("▶ この画像でOCRを実行", type="primary", key="run_img")
+    if not run_img:
         st.stop()
-    st.session_state["ran"] = True
 
     all_corrected_texts: List[str] = []
     pages_layout: List[Dict[str, Any]] = []
