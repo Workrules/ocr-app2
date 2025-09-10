@@ -132,6 +132,7 @@ else:
 
 # ===================== ユーティリティ =====================
 def remove_red_stamp(img_pil: Image.Image) -> Image.Image:
+    """シンプル版：赤系を白で抑制（印影除去ON時のみ使用）"""
     img = np.array(img_pil)
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
     lower_red1 = np.array([0, 70, 50]); upper_red1 = np.array([10, 255, 255])
@@ -317,7 +318,7 @@ def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
     return bio.read()
 
 # ===================== UI =====================
-st.title("📄 Document Intelligence OCR（Azure）— ページ指定/バッチ/GPT/Word/状態保持/ログ強化")
+st.title("📄 Document Intelligence OCR（Azure）— ページ指定/バッチ/GPT/Word/状態保持/印影ON-OFF")
 
 # 診断
 st.sidebar.markdown("### 🔧 環境")
@@ -390,6 +391,7 @@ if "file_bytes" not in st.session_state:
     st.session_state["is_pdf"] = False
     st.session_state["dpi"] = 200
     st.session_state["page_indices"] = []  # ← これの有無で実行済みか判断
+    st.session_state["stamp_mode"] = "OFF"  # 印影除去モード
 
 uploaded = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"], key="uploader")
 if uploaded is not None:
@@ -397,7 +399,7 @@ if uploaded is not None:
     st.session_state["file_name"] = uploaded.name
     st.session_state["file_mime"] = uploaded.type
     st.session_state["is_pdf"] = (uploaded.type == "application/pdf") or uploaded.name.lower().endswith(".pdf")
-    # 新規アップロード時は、ページ選択・結果を初期化
+    # 新規アップロード時は、ページ選択・結果を初期化（印影モードは維持）
     for k in list(st.session_state.keys()):
         if k.startswith("ocr_") or k.startswith("gpt_") or k.startswith("edit_"):
             del st.session_state[k]
@@ -420,6 +422,7 @@ st.sidebar.write({
     "is_pdf": bool(is_input_pdf),
     "saved_indices": st.session_state.get("page_indices", []),
     "dpi": st.session_state.get("dpi", 200),
+    "stamp_mode": st.session_state.get("stamp_mode", "OFF"),
 })
 
 # ===================== OCRコア（自前ポーリング） =====================
@@ -489,6 +492,11 @@ if is_input_pdf:
         dpi = st.slider("DPI", 72, 300, value=st.session_state.get("dpi", 200), step=4)
         st.session_state["dpi"] = dpi
 
+    # --- 印影除去トグル（PDF用） ---
+    stamp_toggle = st.radio(
+        "印影除去（ハンコ）", ["OFF", "ON"], index=0, horizontal=True, key="ui_stamp_toggle"
+    )
+
     if select_mode == "範囲指定" and total_pages > 1:
         start, end = st.slider("処理するページ範囲（1始まり）", 1, total_pages, (1, min(total_pages, 5)))
         chosen_indices = list(range(start - 1, end))
@@ -504,9 +512,11 @@ if is_input_pdf:
     # 実行ボタン
     run_clicked = st.button("▶ この設定でOCRを実行", type="primary", key="run_pdf")
 
-    # クリックされたら今回の選択を保存
-    if run_clicked and chosen_indices:
-        st.session_state["page_indices"] = chosen_indices
+    # クリックされたら今回の選択と印影モードを保存
+    if run_clicked:
+        if chosen_indices:
+            st.session_state["page_indices"] = chosen_indices
+        st.session_state["stamp_mode"] = stamp_toggle
 
     # --- 自動補完：page_indices がまだ空なら埋める（押し忘れ・空入力対策） ---
     if not st.session_state.get("page_indices"):
@@ -515,8 +525,9 @@ if is_input_pdf:
         else:
             st.session_state["page_indices"] = list(range(total_pages))  # 全ページで強制実行
 
-    # 以降、この実行で使うページ指定を固定
+    # 以降、この実行で使う設定を固定
     chosen_indices = st.session_state["page_indices"]
+    stamp_mode = st.session_state.get("stamp_mode", stamp_toggle)  # 初回はUI値
 
     # ===== 実行本体 =====
     EFFECTIVE_BATCH = int(batch_size_override) if batch_size_override else BATCH_SIZE_DEFAULT
@@ -528,7 +539,7 @@ if is_input_pdf:
     done = 0
 
     st.write("### ▶ 実行開始")
-    st.write(f"🧪 ページ: {', '.join(str(i+1) for i in chosen_indices)} / DPI={dpi} / バッチ={EFFECTIVE_BATCH}")
+    st.write(f"🧪 ページ: {', '.join(str(i+1) for i in chosen_indices)} / DPI={dpi} / バッチ={EFFECTIVE_BATCH} / 印影: {stamp_mode}")
 
     for batch_no, batch_indices in enumerate(chunked(chosen_indices, EFFECTIVE_BATCH), start=1):
         status_area.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} （ページ: {', '.join(str(i+1) for i in batch_indices)}）")
@@ -539,8 +550,8 @@ if is_input_pdf:
 
         for page_img, page_num in zip(pages, page_numbers):
             st.write(f"## ページ {page_num}")
-            clean_img = remove_red_stamp(page_img)
-            st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
+            clean_img = remove_red_stamp(page_img) if stamp_mode == "ON" else page_img
+            st.image(clean_img, caption=f"処理画像 (ページ {page_num})", use_container_width=True)
 
             buf = io.BytesIO(); clean_img.save(buf, format="PNG"); png_bytes = buf.getvalue()
 
@@ -646,20 +657,30 @@ else:
         st.exception(e); st.stop()
 
     st.caption("単一画像としてOCRします。")
+
+    # --- 印影除去トグル（画像用） ---
+    stamp_toggle_img = st.radio(
+        "印影除去（ハンコ）", ["OFF", "ON"], index=0, horizontal=True, key="ui_stamp_toggle_img"
+    )
+
     run_img = st.button("▶ この画像でOCRを実行", type="primary", key="run_img")
-    if not run_img and not st.session_state.get("page_indices"):
+    if run_img:
+        st.session_state["page_indices"] = [0]
+        st.session_state["stamp_mode"] = stamp_toggle_img
+    elif not st.session_state.get("page_indices"):
         # 初回の押し忘れでも1ページ実行にフォールバック
         st.session_state["page_indices"] = [0]
-    elif run_img:
-        st.session_state["page_indices"] = [0]
+        st.session_state["stamp_mode"] = stamp_toggle_img
+
+    stamp_mode = st.session_state.get("stamp_mode", stamp_toggle_img)
 
     all_corrected_texts: List[str] = []
     pages_layout: List[Dict[str, Any]] = []
 
     for page_img, page_num in zip(pages, page_numbers):
         st.write(f"## ページ {page_num}")
-        clean_img = remove_red_stamp(page_img)
-        st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
+        clean_img = remove_red_stamp(page_img) if stamp_mode == "ON" else page_img
+        st.image(clean_img, caption=f"処理画像 (ページ {page_num})", use_container_width=True)
 
         buf = io.BytesIO(); clean_img.save(buf, format="PNG"); png_bytes = buf.getvalue()
 
