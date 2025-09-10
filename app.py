@@ -373,12 +373,18 @@ skip_gpt = st.sidebar.checkbox("GPT補正をスキップ", value=False)
 ocr_timeout = st.sidebar.slider("OCRタイムアウト（秒）", 10, 180, 60, step=5)
 batch_size_override = st.sidebar.number_input("バッチサイズ上書き", 1, 20, value=BATCH_SIZE_DEFAULT)
 
-# サイドバー：辞書プレビュー＆手動更新
-dictionary_preview = load_json_any(DICT_FILE)
-st.sidebar.subheader("📖 現在の辞書（プレビュー）")
-st.sidebar.json(dictionary_preview)
-if st.sidebar.button("🔄 辞書プレビューを更新"):
-    st.experimental_rerun()
+# --- サイドバー：辞書プレビュー（rerunなしで再読込） ---
+dict_preview_box = st.sidebar.container()
+with dict_preview_box:
+    st.subheader("📖 現在の辞書（プレビュー）")
+    st.json(load_json_any(DICT_FILE))
+
+# クリック時にサイドバーのプレビューだけ描き直す（rerunしない）
+if st.sidebar.button("🔄 辞書プレビューを再読込", type="secondary"):
+    with dict_preview_box:
+        st.subheader("📖 現在の辞書（プレビュー）")
+        st.json(load_json_any(DICT_FILE))
+
 
 # ファイル入力
 uploaded_file = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"])
