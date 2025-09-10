@@ -20,7 +20,6 @@ from azure.core.credentials import AzureKeyCredential
 
 from openai import OpenAI
 
-# ===== Word出力（シンプルなレイアウト近似） =====
 from docx import Document
 from docx.shared import Cm, Pt
 
@@ -35,11 +34,9 @@ if not AZURE_DOCINT_ENDPOINT or not AZURE_DOCINT_KEY:
     st.error("環境変数またはSecretsで AZURE_DOCINT_ENDPOINT / AZURE_DOCINT_KEY を設定してください。")
     st.stop()
 
-# クライアント
 client = DocumentAnalysisClient(endpoint=AZURE_DOCINT_ENDPOINT, credential=AzureKeyCredential(AZURE_DOCINT_KEY))
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# 文字判定
 JP_CHAR_RE = re.compile(r"^[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]$")
 
 # ===================== ストレージ選択（local / azureblob） =====================
@@ -55,7 +52,6 @@ if STORAGE_BACKEND == "azureblob":
 
     AZURE_BLOB_CONN_STR = os.getenv("AZURE_BLOB_CONN_STR") or st.secrets.get("AZURE_BLOB_CONN_STR")
     OCR_DICT_CONTAINER = os.getenv("OCR_DICT_CONTAINER") or st.secrets.get("OCR_DICT_CONTAINER", "ocr-shared-dict")
-
     if not AZURE_BLOB_CONN_STR:
         st.error("Secrets/環境変数 AZURE_BLOB_CONN_STR を設定してください（Blob接続文字列）。")
         st.stop()
@@ -81,15 +77,12 @@ if STORAGE_BACKEND == "azureblob":
     def _save_json_blob(obj: dict, blob_name: str):
         b = json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
         _container.upload_blob(
-            name=blob_name,
-            data=b,
-            overwrite=True,
+            name=blob_name, data=b, overwrite=True,
             content_settings=ContentSettings(content_type="application/json; charset=utf-8"),
         )
 
     def load_json_any(key: str) -> dict:
         return _load_json_blob(key)
-
     def save_json_any(obj: dict, key: str):
         _save_json_blob(obj, key)
 
@@ -120,10 +113,8 @@ elif STORAGE_BACKEND == "local":
 
     def load_json_any(key: str) -> dict:
         return _load_json_local(key)
-
     def save_json_any(obj: dict, key: str):
         _save_json_local(obj, key)
-
 else:
     st.error(f"未知の OCR_DICT_BACKEND: {STORAGE_BACKEND}（local / azureblob のみ対応）")
     st.stop()
@@ -134,8 +125,7 @@ def remove_red_stamp(img_pil: Image.Image) -> Image.Image:
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
     lower_red1 = np.array([0, 70, 50]); upper_red1 = np.array([10, 255, 255])
     lower_red2 = np.array([170, 70, 50]); upper_red2 = np.array([180, 255, 255])
-    mask = cv2.bitwise_or(cv2.inRange(hsv, lower_red1, upper_red1),
-                          cv2.inRange(hsv, lower_red2, upper_red2))
+    mask = cv2.bitwise_or(cv2.inRange(hsv, lower_red1, upper_red1), cv2.inRange(hsv, lower_red2, upper_red2))
     img[mask > 0] = [255, 255, 255]
     return Image.fromarray(img)
 
@@ -200,7 +190,7 @@ OCR結果:
         st.warning(f"GPT補正をスキップしました（エラー）：{e}")
         return text
 
-# ========== PDFレンダリング・ページ指定 ==========
+# ========== PDFレンダリング ==========
 def is_pdf(b: bytes) -> bool:
     return len(b) >= 5 and b[:5] == b"%PDF-"
 
@@ -242,7 +232,7 @@ def parse_page_spec(spec: str, max_pages: int) -> List[int]:
 def chunked(seq: List[int], n: int) -> List[List[int]]:
     return [seq[i:i+n] for i in range(0, len(seq), n)]
 
-# ========== Azure行の座標（左x/上y） ==========
+# ========== Azure行の座標 ==========
 def line_xy(line_obj: Any) -> Tuple[float, float]:
     poly = getattr(line_obj, "polygon", None) or getattr(line_obj, "bounding_polygon", None)
     if not poly: return (0.0, 0.0)
@@ -302,8 +292,8 @@ def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
     bio = io.BytesIO(); doc.save(bio); bio.seek(0)
     return bio.read()
 
-# ===================== UI =====================
-st.title("📄 Document Intelligence OCR - Web（Azure Blob辞書）/ ページ指定 / 10ページバッチ / GPT補正 / Word出力 / 画面保持")
+# ===================== UI：ヘッダ =====================
+st.title("📄 Document Intelligence OCR（Azure）— ページ指定 / バッチ / GPT補正 / Word出力 / 状態保持 / ハング防止")
 
 # 診断
 st.sidebar.markdown("### 🔧 環境")
@@ -320,9 +310,7 @@ if STORAGE_BACKEND == "azureblob":
     st.sidebar.write({
         "OCR_DICT_BACKEND": "azureblob",
         "container": os.getenv("OCR_DICT_CONTAINER") or st.secrets.get("OCR_DICT_CONTAINER", "ocr-shared-dict"),
-        "DICT_BLOB": DICT_FILE,
-        "UNTRAINED_BLOB": UNTRAINED_FILE,
-        "TRAINED_BLOB": TRAINED_FILE,
+        "DICT_BLOB": DICT_FILE, "UNTRAINED_BLOB": UNTRAINED_FILE, "TRAINED_BLOB": TRAINED_FILE,
     })
 else:
     st.sidebar.write({
@@ -336,10 +324,10 @@ else:
 # デバッグUI
 st.sidebar.markdown("### 🛠 デバッグ")
 skip_gpt = st.sidebar.checkbox("GPT補正をスキップ", value=False)
-ocr_timeout = st.sidebar.slider("OCRタイムアウト（秒）", 10, 180, 60, step=5)
+ocr_timeout = st.sidebar.slider("OCRタイムアウト（秒）", 10, 120, 45, step=5)
 batch_size_override = st.sidebar.number_input("バッチサイズ上書き", 1, 20, value=BATCH_SIZE_DEFAULT)
-use_cache = st.sidebar.checkbox("OCRキャッシュを使う（実験的）", value=False)
-debug_log = st.sidebar.checkbox("🔍 詳細ログを表示", value=True)
+use_cache = st.sidebar.checkbox("OCRキャッシュ（実験）", value=False)
+debug_log = st.sidebar.checkbox("🔍 詳細ログ", value=True)
 
 # 辞書プレビュー（手動再読込）
 dict_preview_box = st.sidebar.container()
@@ -357,9 +345,10 @@ if "file_bytes" not in st.session_state:
     st.session_state["file_name"] = None
     st.session_state["file_mime"] = None
     st.session_state["is_pdf"] = False
-    st.session_state["page_selection_done"] = False
-    st.session_state["chosen_indices"] = None
     st.session_state["dpi"] = 200
+    st.session_state["page_indices"] = []
+    st.session_state["run_params"] = None  # {"dpi":..., "indices":[...]}
+    st.session_state["ran"] = False
 
 uploaded = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"], key="uploader")
 if uploaded is not None:
@@ -367,13 +356,13 @@ if uploaded is not None:
     st.session_state["file_name"] = uploaded.name
     st.session_state["file_mime"] = uploaded.type
     st.session_state["is_pdf"] = (uploaded.type == "application/pdf") or uploaded.name.lower().endswith(".pdf")
+    # 既存状態の初期化
     for k in list(st.session_state.keys()):
-        if k.startswith("ocr_cache_"): del st.session_state[k]
         if k.startswith("ocr_") or k.startswith("gpt_") or k.startswith("edit_"):
             del st.session_state[k]
-    st.session_state["page_selection_done"] = False
-    st.session_state["chosen_indices"] = None
-    st.session_state["dpi"] = 200
+    st.session_state["page_indices"] = []
+    st.session_state["run_params"] = None
+    st.session_state["ran"] = False
 
 file_bytes = st.session_state["file_bytes"]
 if not file_bytes:
@@ -383,17 +372,37 @@ if not file_bytes:
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 is_input_pdf = st.session_state["is_pdf"]
 
-# ===================== OCR関数（キャッシュOFF/ON） =====================
-def _ocr_read_once(png_bytes: bytes, timeout_sec: float) -> dict:
+# ===================== OCR関数（非ブロッキング・手動ポーリング） =====================
+def _ocr_polling(png_bytes: bytes, timeout_sec: float, log_area=None) -> dict:
+    """Azure LROを自前ポーリング。ハング時はtimeoutで確実に帰る。"""
     poller = client.begin_analyze_document("prebuilt-read", document=io.BytesIO(png_bytes))
-    result = poller.result(timeout=float(timeout_sec))
+    status = st.empty()
+    t0 = time.perf_counter()
+    while True:
+        if poller.done():
+            break
+        elapsed = time.perf_counter() - t0
+        if elapsed > float(timeout_sec):
+            try:
+                # 明示的キャンセルAPIは無いが、以降このpollerは破棄
+                pass
+            finally:
+                status.empty()
+            raise TimeoutError(f"Azure OCR timeout after {elapsed:.1f}s")
+        status.info(f"Azure OCR 実行中… {elapsed:.1f}s / {timeout_sec:.0f}s")
+        time.sleep(0.3)
+    status.empty()
+
+    result = poller.result()
     doc_page = result.pages[0] if getattr(result, "pages", None) else None
     if not doc_page:
         return {"pw": 1.0, "ph": 1.0, "lines": [], "raw": getattr(result, "content", "")}
+
     lines = []
     for ln in getattr(doc_page, "lines", []) or []:
         x, y = line_xy(ln)
         lines.append({"content": ln.content, "x": float(x), "y": float(y)})
+
     return {
         "pw": float(getattr(doc_page, "width", 1.0) or 1.0),
         "ph": float(getattr(doc_page, "height", 1.0) or 1.0),
@@ -402,68 +411,80 @@ def _ocr_read_once(png_bytes: bytes, timeout_sec: float) -> dict:
     }
 
 @st.cache_data(show_spinner=False)
-def _ocr_read_cached(png_digest: str, png_bytes: bytes, timeout_sec: float) -> dict:
-    return _ocr_read_once(png_bytes, timeout_sec)
+def _ocr_cached(digest: str, png_bytes: bytes, timeout_sec: float) -> dict:
+    return _ocr_polling(png_bytes, timeout_sec)
 
-# ===================== PDF：ページ指定（保持） =====================
+def _ocr_dispatch(png_bytes: bytes, timeout_sec: float, use_cache: bool) -> dict:
+    if use_cache:
+        digest = hashlib.md5(png_bytes).hexdigest()
+        return _ocr_cached(digest, png_bytes, timeout_sec)
+    else:
+        return _ocr_polling(png_bytes, timeout_sec)
+
+# ===================== ページ選択（フォーム廃止：常時UI＋実行ボタン） =====================
 if is_input_pdf:
+    # PDFページ数
     try:
         pdf_for_count = pdfium.PdfDocument(io.BytesIO(file_bytes))
         total_pages = len(pdf_for_count)
     except Exception as e:
         st.exception(e); st.stop()
 
-    if not st.session_state["page_selection_done"]:
-        with st.form("pdf_select_form"):
-            st.subheader("▶ OCRするページを先に選択")
-            select_mode = st.radio(
-                "選択方法",
-                options=["全ページ", "範囲指定", "ページ番号指定（例: 1,3,5-7）"],
-                index=1 if total_pages > 1 else 0,
-                horizontal=True
-            )
-            dpi = st.slider("レンダリングDPI（高いほど精細・重い）", 72, 300, 200, step=4)
-
-            if select_mode == "範囲指定" and total_pages > 1:
-                start, end = st.slider("処理するページ範囲（1始まり）", 1, total_pages, (1, min(total_pages, 5)))
-                chosen_indices = list(range(start - 1, end))
-            elif select_mode == "ページ番号指定（例: 1,3,5-7）":
-                spec = st.text_input("ページ番号（カンマ区切り、範囲はハイフン）", value="1-3" if total_pages >= 3 else "1")
-                chosen_indices = parse_page_spec(spec, total_pages)
-                if not chosen_indices:
-                    st.info("有効なページ番号を入力してください。例: 1,3,5-7")
-            else:
-                chosen_indices = list(range(total_pages))
-
-            submitted = st.form_submit_button("このページだけOCRを実行")
-
-        if not submitted or not chosen_indices:
-            st.stop()
-
-        st.session_state["page_selection_done"] = True
-        st.session_state["chosen_indices"] = chosen_indices
+    st.subheader("▶ OCRするページを先に選択")
+    col1, col2 = st.columns([2,1])
+    with col1:
+        select_mode = st.radio(
+            "選択方法",
+            options=["全ページ", "範囲指定", "ページ番号指定（例: 1,3,5-7）"],
+            index=1 if total_pages > 1 else 0,
+            horizontal=True
+        )
+    with col2:
+        dpi = st.slider("DPI", 72, 300, value=st.session_state.get("dpi", 200), step=4)
         st.session_state["dpi"] = dpi
-        st.rerun()
+
+    if select_mode == "範囲指定" and total_pages > 1:
+        start, end = st.slider("処理するページ範囲（1始まり）", 1, total_pages, (1, min(total_pages, 5)))
+        chosen_indices = list(range(start - 1, end))
+    elif select_mode == "ページ番号指定（例: 1,3,5-7）":
+        spec_default = "1-3" if total_pages >= 3 else "1"
+        spec = st.text_input("ページ番号（カンマ区切り、範囲はハイフン）", value=spec_default)
+        chosen_indices = parse_page_spec(spec, total_pages)
+        if not chosen_indices:
+            st.info("有効なページ番号を入力してください。例: 1,3,5-7")
     else:
-        chosen_indices = st.session_state["chosen_indices"]
-        dpi = st.session_state["dpi"]
+        chosen_indices = list(range(total_pages))
+
+    st.caption(f"選択中: {', '.join(str(i+1) for i in chosen_indices)} / DPI={dpi}")
+
+    run_clicked = st.button("▶ この設定でOCRを実行", type="primary")
+    if run_clicked:
+        st.session_state["page_indices"] = chosen_indices
+        st.session_state["run_params"] = {"dpi": dpi, "indices": chosen_indices}
+        st.session_state["ran"] = True
+        st.rerun()
+
+    # 実行済みであれば、その設定で処理
+    if not st.session_state.get("ran"):
+        st.stop()
+
+    chosen_indices = st.session_state.get("page_indices", [])
+    dpi = st.session_state.get("run_params", {}).get("dpi", 200)
 
     EFFECTIVE_BATCH = int(batch_size_override) if batch_size_override else BATCH_SIZE_DEFAULT
-
     total_to_process = len(chosen_indices)
     progress = st.progress(0.0)
-    status = st.empty()
+    status_area = st.empty()
     all_corrected_texts: List[str] = []
     pages_layout: List[Dict[str, Any]] = []
     done = 0
 
-    st.caption(f"🧪 選択ページ: {', '.join(str(i+1) for i in chosen_indices)} / DPI={dpi} / バッチ={EFFECTIVE_BATCH}")
+    status_area.info(f"🔄 バッチ処理開始（合計 {total_to_process} ページ / バッチ {EFFECTIVE_BATCH}）")
 
     for batch_no, batch_indices in enumerate(chunked(chosen_indices, EFFECTIVE_BATCH), start=1):
-        status.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} （ページ: {', '.join(str(i+1) for i in batch_indices)}）")
+        status_area.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} （ページ: {', '.join(str(i+1) for i in batch_indices)}）")
         try:
             pages, page_numbers = render_pdf_selected_pages(file_bytes, batch_indices, dpi=dpi)
-            if debug_log: st.write(f"🖼️ レンダリング完了: {len(pages)} ページ")
         except Exception as e:
             st.exception(e); st.stop()
 
@@ -475,18 +496,13 @@ if is_input_pdf:
             st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
 
             buf = io.BytesIO(); clean_img.save(buf, format="PNG"); png_bytes = buf.getvalue()
-            png_digest = hashlib.md5(png_bytes).hexdigest()
-            dbg.write(f"step: OCR呼び出し → use_cache={use_cache}")
 
             with st.spinner("OCRを実行中..."):
                 t0 = time.perf_counter()
                 try:
-                    if use_cache:
-                        cached = _ocr_read_cached(png_digest, png_bytes, ocr_timeout)
-                    else:
-                        cached = _ocr_read_once(png_bytes, ocr_timeout)
+                    cached = _ocr_dispatch(png_bytes, ocr_timeout, use_cache)
                 except Exception as e:
-                    st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
+                    st.error(f"OCRに失敗：{e}")
                     st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
                     if debug_log: dbg.exception(e)
                     continue
@@ -494,29 +510,22 @@ if is_input_pdf:
                 st.caption(f"OCR実行時間: {elapsed:.1f}s")
                 dbg.write(f"step: Azure応答 取得済 / {elapsed:.2f}s")
 
-            azure_lines_slim = cached.get("lines") or []
-            default_text = "\n".join([ln["content"] for ln in azure_lines_slim]) if azure_lines_slim else (cached.get("raw") or "")
-            dbg.write(f"step: テキスト生成 lines={len(azure_lines_slim)} chars={len(default_text)}")
-
+            azure_lines = cached.get("lines") or []
+            default_text = "\n".join([ln["content"] for ln in azure_lines]) if azure_lines else (cached.get("raw") or "")
+            dbg.write(f"step: テキスト生成 lines={len(azure_lines)} chars={len(default_text)}")
             if not default_text.strip():
                 st.warning("OCRは成功しましたがテキストが空でした。DPIや画像品質を見直してください。")
-                if debug_log:
-                    dbg.json(cached)
+                if debug_log: dbg.json(cached)
 
             dictionary = load_json_any(DICT_FILE)
             gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
 
-            # --- セッションキー ---
             ocr_key = f"ocr_{page_num}"
             gpt_key = f"gpt_{page_num}"
             edit_key = f"edit_{page_num}"
-
-            if ocr_key not in st.session_state:
-                st.session_state[ocr_key] = default_text
-            if gpt_key not in st.session_state:
-                st.session_state[gpt_key] = gpt_checked_text
-            if edit_key not in st.session_state:
-                st.session_state[edit_key] = gpt_checked_text
+            if ocr_key not in st.session_state: st.session_state[ocr_key] = default_text
+            if gpt_key not in st.session_state: st.session_state[gpt_key] = gpt_checked_text
+            if edit_key not in st.session_state: st.session_state[edit_key] = gpt_checked_text
 
             tab2, tab3, tab4 = st.tabs(["🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
             with tab2:
@@ -534,7 +543,6 @@ if is_input_pdf:
                         if debug_log: dbg.write(f"学習追加: {len(learned)} 件")
                     else:
                         st.info("修正が検出されませんでした。")
-                    # rerunしない
 
             final_text_page = (
                 st.session_state.get(edit_key)
@@ -546,18 +554,14 @@ if is_input_pdf:
 
             gpt_lines = final_text_page.splitlines()
             lines_for_layout = []
-            for i, ln in enumerate(azure_lines_slim):
+            for i, ln in enumerate(azure_lines):
                 x, y = ln["x"], ln["y"]
                 text_for_line = gpt_lines[i] if i < len(gpt_lines) else ln["content"]
                 lines_for_layout.append({"text": text_for_line, "x": x, "y": y})
-
-            page_layout_info = {
-                "page_width": cached["pw"],
-                "page_height": cached["ph"],
-                "unit": "pixel",
+            pages_layout.append({
+                "page_width": cached["pw"], "page_height": cached["ph"], "unit": "pixel",
                 "lines": lines_for_layout
-            }
-            pages_layout.append(page_layout_info)
+            })
 
             done += 1; progress.progress(done / total_to_process)
             if debug_log: dbg.write("step: ページ完了")
@@ -565,24 +569,21 @@ if is_input_pdf:
         del pages, page_numbers
         gc.collect()
 
-    status.success("✅ すべてのページの処理が完了しました。")
+    status_area.success("✅ すべてのページの処理が完了しました。")
 
     if all_corrected_texts:
         joined_txt = "\n\n".join(all_corrected_texts)
         st.download_button(
             "📥 補正テキストをダウンロード（TXT, ページ見出しなし）",
-            data=joined_txt.encode("utf-8"),
-            file_name="ocr_corrected.txt",
-            mime="text/plain"
+            data=joined_txt.encode("utf-8"), file_name="ocr_corrected.txt", mime="text/plain"
         )
     if pages_layout:
         try:
-            docx_bytes = build_docx_from_layout(pages_layout)
             st.download_button(
                 "📥 Word（.docx：レイアウト近似）",
-                data=docx_bytes,
+                data=build_docx_from_layout(pages_layout),
                 file_name="ocr_layout.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         except Exception as e:
             st.warning(f"Word出力に失敗しました：{e}")
@@ -602,6 +603,12 @@ else:
     except Exception as e:
         st.exception(e); st.stop()
 
+    st.caption("単一画像としてOCRします。")
+    run_img = st.button("▶ この画像でOCRを実行", type="primary")
+    if not run_img and not st.session_state.get("ran"):
+        st.stop()
+    st.session_state["ran"] = True
+
     all_corrected_texts: List[str] = []
     pages_layout: List[Dict[str, Any]] = []
 
@@ -613,18 +620,13 @@ else:
         st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
 
         buf = io.BytesIO(); clean_img.save(buf, format="PNG"); png_bytes = buf.getvalue()
-        png_digest = hashlib.md5(png_bytes).hexdigest()
-        dbg.write(f"step: OCR呼び出し → use_cache={use_cache}")
 
         with st.spinner("OCRを実行中..."):
             t0 = time.perf_counter()
             try:
-                if use_cache:
-                    cached = _ocr_read_cached(png_digest, png_bytes, ocr_timeout)
-                else:
-                    cached = _ocr_read_once(png_bytes, ocr_timeout)
+                cached = _ocr_dispatch(png_bytes, ocr_timeout, use_cache)
             except Exception as e:
-                st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
+                st.error(f"OCRに失敗：{e}")
                 st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
                 if debug_log: dbg.exception(e)
                 continue
@@ -632,9 +634,9 @@ else:
             st.caption(f"OCR実行時間: {elapsed:.1f}s")
             dbg.write(f"step: Azure応答 取得済 / {elapsed:.2f}s")
 
-        azure_lines_slim = cached.get("lines") or []
-        default_text = "\n".join([ln["content"] for ln in azure_lines_slim]) if azure_lines_slim else (cached.get("raw") or "")
-        dbg.write(f"step: テキスト生成 lines={len(azure_lines_slim)} chars={len(default_text)}")
+        azure_lines = cached.get("lines") or []
+        default_text = "\n".join([ln["content"] for ln in azure_lines]) if azure_lines else (cached.get("raw") or "")
+        dbg.write(f"step: テキスト生成 lines={len(azure_lines)} chars={len(default_text)}")
         if not default_text.strip():
             st.warning("OCRは成功しましたがテキストが空でした。DPIや画像品質を見直してください。")
             if debug_log: dbg.json(cached)
@@ -642,22 +644,14 @@ else:
         dictionary = load_json_any(DICT_FILE)
         gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
 
-        ocr_key = f"ocr_{page_num}"
-        gpt_key = f"gpt_{page_num}"
-        edit_key = f"edit_{page_num}"
-
-        if ocr_key not in st.session_state:
-            st.session_state[ocr_key] = default_text
-        if gpt_key not in st.session_state:
-            st.session_state[gpt_key] = gpt_checked_text
-        if edit_key not in st.session_state:
-            st.session_state[edit_key] = gpt_checked_text
+        ocr_key = f"ocr_{page_num}"; gpt_key = f"gpt_{page_num}"; edit_key = f"edit_{page_num}"
+        if ocr_key not in st.session_state: st.session_state[ocr_key] = default_text
+        if gpt_key not in st.session_state: st.session_state[gpt_key] = gpt_checked_text
+        if edit_key not in st.session_state: st.session_state[edit_key] = gpt_checked_text
 
         tab2, tab3, tab4 = st.tabs(["🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
-        with tab2:
-            st.text_area(f"OCRテキスト（ページ {page_num}）", height=320, key=ocr_key)
-        with tab3:
-            st.text_area(f"GPT補正（ページ {page_num}）", height=320, key=gpt_key)
+        with tab2: st.text_area(f"OCRテキスト（ページ {page_num}）", height=320, key=ocr_key)
+        with tab3: st.text_area(f"GPT補正（ページ {page_num}）", height=320, key=gpt_key)
         with tab4:
             st.text_area(f"手作業修正（ページ {page_num}）", height=320, key=edit_key)
             if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
@@ -670,44 +664,26 @@ else:
                 else:
                     st.info("修正が検出されませんでした。")
 
-        final_text_page = (
-            st.session_state.get(edit_key)
-            or st.session_state.get(gpt_key)
-            or gpt_checked_text
-            or default_text
-        ).strip()
+        final_text_page = (st.session_state.get(edit_key) or st.session_state.get(gpt_key) or gpt_checked_text or default_text).strip()
         all_corrected_texts.append(final_text_page)
 
         gpt_lines = final_text_page.splitlines()
         lines_for_layout = []
-        for i, ln in enumerate(azure_lines_slim):
+        for i, ln in enumerate(azure_lines):
             x, y = ln["x"], ln["y"]
             text_for_line = gpt_lines[i] if i < len(gpt_lines) else ln["content"]
             lines_for_layout.append({"text": text_for_line, "x": x, "y": y})
-        page_layout_info = {
-            "page_width": cached["pw"],
-            "page_height": cached["ph"],
-            "unit": "pixel",
-            "lines": lines_for_layout
-        }
-        pages_layout.append(page_layout_info)
+        pages_layout.append({"page_width": cached["pw"], "page_height": cached["ph"], "unit": "pixel", "lines": lines_for_layout})
 
     if all_corrected_texts:
         joined_txt = "\n\n".join(all_corrected_texts)
-        st.download_button(
-            "📥 補正テキストをダウンロード（TXT, ページ見出しなし）",
-            data=joined_txt.encode("utf-8"),
-            file_name="ocr_corrected.txt",
-            mime="text/plain"
-        )
+        st.download_button("📥 補正テキストをダウンロード（TXT, ページ見出しなし）",
+                           data=joined_txt.encode("utf-8"), file_name="ocr_corrected.txt", mime="text/plain")
     if pages_layout:
         try:
-            docx_bytes = build_docx_from_layout(pages_layout)
-            st.download_button(
-                "📥 Word（.docx：レイアウト近似）",
-                data=docx_bytes,
-                file_name="ocr_layout.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            st.download_button("📥 Word（.docx：レイアウト近似）",
+                               data=build_docx_from_layout(pages_layout),
+                               file_name="ocr_layout.docx",
+                               mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         except Exception as e:
             st.warning(f"Word出力に失敗しました：{e}")
