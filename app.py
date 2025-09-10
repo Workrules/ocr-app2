@@ -47,7 +47,7 @@ JP_CHAR_RE = re.compile(r"^[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]$")
 STORAGE_BACKEND = os.getenv("OCR_DICT_BACKEND") or st.secrets.get("OCR_DICT_BACKEND", "local")
 
 if STORAGE_BACKEND == "azureblob":
-    # Azure Blob Storage を使用（本番Web推奨）
+    # Azure Blob Storage を使用
     try:
         from azure.storage.blob import BlobServiceClient, ContentSettings
         from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
@@ -100,7 +100,7 @@ if STORAGE_BACKEND == "azureblob":
         _save_json_blob(obj, key)
 
 elif STORAGE_BACKEND == "local":
-    # ローカルJSON（開発・検証向け）
+    # ローカルJSON
     DICT_DIR = os.getenv("OCR_DICT_DIR") or st.secrets.get("OCR_DICT_DIR", ".")
     DICT_FILE = os.path.join(DICT_DIR, "ocr_char_corrections.json")
     UNTRAINED_FILE = os.path.join(DICT_DIR, "untrained_confusions.json")
@@ -356,9 +356,7 @@ st.sidebar.markdown("### 🛠 デバッグ")
 skip_gpt = st.sidebar.checkbox("GPT補正をスキップ", value=False)
 ocr_timeout = st.sidebar.slider("OCRタイムアウト（秒）", 10, 180, 60, step=5)
 batch_size_override = st.sidebar.number_input("バッチサイズ上書き", 1, 20, value=BATCH_SIZE_DEFAULT)
-# デバッグUI の直下に追加
 use_cache = st.sidebar.checkbox("OCRキャッシュを使う（実験的）", value=False)
-
 
 # --- サイドバー：辞書プレビュー（ボタンで読み直し） ---
 dict_preview_box = st.sidebar.container()
@@ -495,23 +493,27 @@ if is_input_pdf:
             buf = io.BytesIO(); clean_img.save(buf, format="PNG"); png_bytes = buf.getvalue()
             png_digest = hashlib.md5(png_bytes).hexdigest()
 
-  with st.spinner("OCRを実行中..."):
-    t0 = time.perf_counter()
-    try:
-        if use_cache:
-            cached = _ocr_read_cached(png_digest, png_bytes, ocr_timeout)
-        else:
-            cached = _ocr_read_once(png_bytes, ocr_timeout)
-    except Exception as e:
-        st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
-        st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
-        continue
-    st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+            with st.spinner("OCRを実行中..."):
+                t0 = time.perf_counter()
+                try:
+                    if use_cache:
+                        cached = _ocr_read_cached(png_digest, png_bytes, ocr_timeout)
+                    else:
+                        cached = _ocr_read_once(png_bytes, ocr_timeout)
+                except Exception as e:
+                    st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
+                    st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
+                    continue
+                st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
 
-azure_lines_slim = cached["lines"]
-default_text = "\n".join([ln["content"] for ln in azure_lines_slim]) if azure_lines_slim else (cached.get("raw") or "")
-if not default_text.strip():
-    st.warning("OCRは成功しましたがテキストが空でした。画像の解像度/DPIや赤ハンコ除去を見直してください。")
+            azure_lines_slim = cached["lines"]
+            default_text = "\n".join([ln["content"] for ln in azure_lines_slim]) if azure_lines_slim else (cached.get("raw") or "")
+            if not default_text.strip():
+                st.warning("OCRは成功しましたがテキストが空でした。DPIや画像品質を見直してください。")
+
+            # 共有辞書を毎回最新で読みつつ、必要に応じてGPT補正
+            dictionary = load_json_any(DICT_FILE)
+            gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
 
             # --- セッションキー ---
             ocr_key = f"ocr_{page_num}"
@@ -538,13 +540,13 @@ if not default_text.strip():
                 st.text_area(f"手作業修正（ページ {page_num}）", height=320, key=edit_key)
                 if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
                     corrected_text_current = st.session_state.get(edit_key, gpt_checked_text)
-                    learned = learn_charwise_with_missing(default_text, corrected_text_current)
+                    learned = learn_charwise_with_missing(st.session_state.get(ocr_key, default_text), corrected_text_current)
                     if learned:
                         update_dictionary_and_untrained(learned)
                         st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
                     else:
                         st.info("修正が検出されませんでした。")
-                    # rerunしない（状態保持で復元可能）
+                    # rerunしない（状態保持で復元）
 
             # TXT（ページ見出しなしで連結：セッションを優先）
             final_text_page = (
@@ -627,7 +629,10 @@ else:
         with st.spinner("OCRを実行中..."):
             t0 = time.perf_counter()
             try:
-                cached = _ocr_read_cached(png_digest, png_bytes, ocr_timeout)
+                if use_cache:
+                    cached = _ocr_read_cached(png_digest, png_bytes, ocr_timeout)
+                else:
+                    cached = _ocr_read_once(png_bytes, ocr_timeout)
             except Exception as e:
                 st.error(f"OCRが{ocr_timeout}秒以内に完了しませんでした / 失敗しました：{e}")
                 st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
@@ -635,7 +640,9 @@ else:
             st.caption(f"OCR実行時間: {time.perf_counter() - t0:.1f}s")
 
         azure_lines_slim = cached["lines"]
-        default_text = "\n".join([ln["content"] for ln in azure_lines_slim])
+        default_text = "\n".join([ln["content"] for ln in azure_lines_slim]) if azure_lines_slim else (cached.get("raw") or "")
+        if not default_text.strip():
+            st.warning("OCRは成功しましたがテキストが空でした。DPIや画像品質を見直してください。")
 
         dictionary = load_json_any(DICT_FILE)
         gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
@@ -663,7 +670,7 @@ else:
             st.text_area(f"手作業修正（ページ {page_num}）", height=320, key=edit_key)
             if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
                 corrected_text_current = st.session_state.get(edit_key, gpt_checked_text)
-                learned = learn_charwise_with_missing(default_text, corrected_text_current)
+                learned = learn_charwise_with_missing(st.session_state.get(ocr_key, default_text), corrected_text_current)
                 if learned:
                     update_dictionary_and_untrained(learned)
                     st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
