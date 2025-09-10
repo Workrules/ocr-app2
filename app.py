@@ -121,7 +121,8 @@ elif STORAGE_BACKEND == "local":
         tmp_path = f"{path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=2)
-            f.flush(); os.fsync(f.fileno())
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, path)
 
     def load_json_any(key: str) -> dict:
@@ -139,16 +140,17 @@ def remove_red_stamp(img_pil: Image.Image) -> Image.Image:
     """赤い印影を白に飛ばす簡易フィルタ"""
     img = np.array(img_pil)
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-    lower_red1 = np.array([0, 70, 50]); upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 70, 50]); upper_red2 = np.array([180, 255, 255])
-    mask = cv2.bitwise_or(cv2.inRange(hsv, lower_red1, upper_red1),
-                          cv2.inRange(hsv, lower_red2, upper_red2))
+    lower_red1 = np.array([0, 70, 50])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([170, 70, 50])
+    upper_red2 = np.array([180, 255, 255])
+    mask = cv2.bitwise_or(cv2.inRange(hsv, lower_red1, upper_red1), cv2.inRange(hsv, lower_red2, upper_red2))
     img[mask > 0] = [255, 255, 255]
     return Image.fromarray(img)
 
 def learn_charwise_with_missing(original: str, corrected: str) -> dict:
     """文字単位の差分から「誤→正」を学習（欠落は '□' として扱う）"""
-    learned = {}
+    learned: Dict[str, Dict[str, Any]] = {}
     import difflib
     sm = difflib.SequenceMatcher(None, original, corrected)
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -196,7 +198,7 @@ OCR結果:
             model=MODEL_NAME,
             input=prompt,
             text={"verbosity": "low"},
-            reasoning={"effort": "minimal"}
+            reasoning={"effort": "minimal"},
         )
         if hasattr(resp, "output_text") and resp.output_text:
             return resp.output_text.strip()
@@ -225,7 +227,8 @@ def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: 
     for idx in indices_0based:
         page = pdf[idx]
         pil = page.render(scale=scale).to_pil().convert("RGB")
-        imgs.append(pil); nums.append(idx + 1)
+        imgs.append(pil)
+        nums.append(idx + 1)
     return imgs, nums
 
 def parse_page_spec(spec: str, max_pages: int) -> List[int]:
@@ -255,7 +258,7 @@ def parse_page_spec(spec: str, max_pages: int) -> List[int]:
     return sorted(out)
 
 def chunked(seq: List[int], n: int) -> List[List[int]]:
-    return [seq[i:i+n] for i in range(0, len(seq), n)]
+    return [seq[i : i + n] for i in range(0, len(seq), n)]
 
 # ========== Azure行の座標（左x/上y） ==========
 def line_xy(line_obj: Any) -> Tuple[float, float]:
@@ -264,14 +267,18 @@ def line_xy(line_obj: Any) -> Tuple[float, float]:
         return (0.0, 0.0)
     xs, ys = [], []
     for p in poly:
-        x = getattr(p, "x", None); y = getattr(p, "y", None)
+        x = getattr(p, "x", None)
+        y = getattr(p, "y", None)
         if x is None and isinstance(p, dict):
-            x = p.get("x", 0.0); y = p.get("y", 0.0)
-        xs.append(float(x)); ys.append(float(y))
+            x = p.get("x", 0.0)
+            y = p.get("y", 0.0)
+        xs.append(float(x))
+        ys.append(float(y))
     return (min(xs or [0.0]), min(ys or [0.0]))
 
 # ========== Word（docx）生成（左インデント近似のみ） ==========
 EMU_PER_CM = 360000.0
+
 def to_cm(val) -> float:
     try:
         return float(getattr(val, "cm"))
@@ -284,15 +291,21 @@ def to_cm(val) -> float:
 def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
     doc = Document()
     section = doc.sections[0]
-    section.page_width = Cm(21.0); section.page_height = Cm(29.7)
-    section.left_margin = Cm(2.0); section.right_margin = Cm(2.0)
-    section.top_margin = Cm(2.0); section.bottom_margin = Cm(2.0)
+    section.page_width = Cm(21.0)
+    section.page_height = Cm(29.7)
+    section.left_margin = Cm(2.0)
+    section.right_margin = Cm(2.0)
+    section.top_margin = Cm(2.0)
+    section.bottom_margin = Cm(2.0)
 
     page_w_cm = to_cm(section.page_width)
-    left_cm = to_cm(section.left_margin); right_cm = to_cm(section.right_margin)
+    left_cm = to_cm(section.left_margin)
+    right_cm = to_cm(section.right_margin)
     content_width_cm = max(0.1, page_w_cm - left_cm - right_cm)
 
-    style = doc.styles["Normal"]; style.font.name = "Yu Gothic"; style.font.size = Pt(11)
+    style = doc.styles["Normal"]
+    style.font.name = "Yu Gothic"
+    style.font.size = Pt(11)
 
     for idx, page in enumerate(pages_layout, start=1):
         pw = float(page.get("page_width") or 1.0)
@@ -303,8 +316,11 @@ def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
         prev_y = None
 
         for item in lines_sorted:
-            txt = item["text"]; x = float(item["x"]); y = float(item["y"])
-            para = doc.add_paragraph(); para.add_run(txt)
+            txt = item["text"]
+            x = float(item["x"])
+            y = float(item["y"])
+            para = doc.add_paragraph()
+            para.add_run(txt)
             indent_cm = max(0.0, min(0.9 * content_width_cm, (x / max(pw, 1e-6)) * content_width_cm))
             para.paragraph_format.left_indent = Cm(indent_cm)
             para.paragraph_format.space_after = Pt(2)
@@ -315,7 +331,9 @@ def build_docx_from_layout(pages_layout: List[Dict[str, Any]]) -> bytes:
         if idx < len(pages_layout):
             doc.add_page_break()
 
-    bio = io.BytesIO(); doc.save(bio); bio.seek(0)
+    bio = io.BytesIO()
+    doc.save(bio)
+    bio.seek(0)
     return bio.read()
 
 # ===================== UI =====================
@@ -355,13 +373,12 @@ skip_gpt = st.sidebar.checkbox("GPT補正をスキップ", value=False)
 ocr_timeout = st.sidebar.slider("OCRタイムアウト（秒）", 10, 180, 60, step=5)
 batch_size_override = st.sidebar.number_input("バッチサイズ上書き", 1, 20, value=BATCH_SIZE_DEFAULT)
 
-# 現在の辞書プレビュー
+# サイドバー：辞書プレビュー＆手動更新
 dictionary_preview = load_json_any(DICT_FILE)
 st.sidebar.subheader("📖 現在の辞書（プレビュー）")
-# サイドバー：プレビュー更新ボタン（任意）
+st.sidebar.json(dictionary_preview)
 if st.sidebar.button("🔄 辞書プレビューを更新"):
     st.experimental_rerun()
-st.sidebar.json(dictionary_preview)
 
 # ファイル入力
 uploaded_file = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"])
@@ -379,7 +396,8 @@ if is_input_pdf:
         pdf_for_count = pdfium.PdfDocument(io.BytesIO(file_bytes))
         total_pages = len(pdf_for_count)
     except Exception as e:
-        st.exception(e); st.stop()
+        st.exception(e)
+        st.stop()
 
     with st.form("pdf_select_form"):
         st.subheader("▶ OCRするページを先に選択")
@@ -387,7 +405,7 @@ if is_input_pdf:
             "選択方法",
             options=["全ページ", "範囲指定", "ページ番号指定（例: 1,3,5-7）"],
             index=1 if total_pages > 1 else 0,
-            horizontal=True
+            horizontal=True,
         )
         dpi = st.slider("レンダリングDPI（高いほど精細・重い）", 72, 300, 200, step=4)
 
@@ -417,17 +435,22 @@ if is_input_pdf:
     done = 0
 
     for batch_no, batch_indices in enumerate(chunked(chosen_indices, EFFECTIVE_BATCH), start=1):
-        status.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} を処理中（ページ: {', '.join(str(i+1) for i in batch_indices)}）")
+        status.info(
+            f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} を処理中（ページ: {', '.join(str(i+1) for i in batch_indices)}）"
+        )
         try:
             pages, page_numbers = render_pdf_selected_pages(file_bytes, batch_indices, dpi=dpi)
         except Exception as e:
-            st.exception(e); st.stop()
+            st.exception(e)
+            st.stop()
 
         for page_img, page_num in zip(pages, page_numbers):
             st.write(f"## ページ {page_num}")
             clean_img = remove_red_stamp(page_img)
 
-            buf = io.BytesIO(); clean_img.save(buf, format="PNG"); buf.seek(0)
+            buf = io.BytesIO()
+            clean_img.save(buf, format="PNG")
+            buf.seek(0)
 
             with st.spinner("OCRを実行中..."):
                 t0 = time.perf_counter()
@@ -443,7 +466,8 @@ if is_input_pdf:
             doc_page = result.pages[0] if getattr(result, "pages", None) else None
             if not doc_page:
                 st.warning("OCR結果にページが見つかりませんでした。")
-                done += 1; progress.progress(done / total_to_process)
+                done += 1
+                progress.progress(done / total_to_process)
                 continue
 
             azure_lines = getattr(doc_page, "lines", []) or []
@@ -466,31 +490,16 @@ if is_input_pdf:
             if edit_key not in st.session_state:
                 st.session_state[edit_key] = gpt_checked_text
 
-            # ビュータブ
+            # ビュータブ（valueは渡さず key のみ）
             tab1, tab2, tab3, tab4 = st.tabs(["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
             with tab1:
                 st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
             with tab2:
-                st.text_area(
-                    f"OCRテキスト（ページ {page_num}）",
-                    value=st.session_state.get(ocr_key, default_text),
-                    height=320,
-                    key=ocr_key
-                )
+                st.text_area(f"OCRテキスト（ページ {page_num}）", height=320, key=ocr_key)
             with tab3:
-                st.text_area(
-                    f"GPT補正（ページ {page_num}）",
-                    value=st.session_state.get(gpt_key, gpt_checked_text),
-                    height=320,
-                    key=gpt_key
-                )
+                st.text_area(f"GPT補正（ページ {page_num}）", height=320, key=gpt_key)
             with tab4:
-                st.text_area(
-                    f"手作業修正（ページ {page_num}）",
-                    value=st.session_state.get(edit_key, gpt_checked_text),
-                    height=320,
-                    key=edit_key
-                )
+                st.text_area(f"手作業修正（ページ {page_num}）", height=320, key=edit_key)
                 if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
                     corrected_text_current = st.session_state.get(edit_key, gpt_checked_text)
                     learned = learn_charwise_with_missing(default_text, corrected_text_current)
@@ -499,10 +508,15 @@ if is_input_pdf:
                         st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
                     else:
                         st.info("修正が検出されませんでした。")
-                    # 画面保持のため rerun しない
+                    # rerunしない
 
             # TXT（ページ見出しなしで連結：セッションを優先）
-            final_text_page = (st.session_state.get(edit_key) or st.session_state.get(gpt_key) or gpt_checked_text or default_text).strip()
+            final_text_page = (
+                st.session_state.get(edit_key)
+                or st.session_state.get(gpt_key)
+                or gpt_checked_text
+                or default_text
+            ).strip()
             all_corrected_texts.append(final_text_page)
 
             # Word用レイアウト：セッションの編集結果を優先
@@ -517,11 +531,12 @@ if is_input_pdf:
                 "page_width": getattr(doc_page, "width", None) or 1.0,
                 "page_height": getattr(doc_page, "height", None) or 1.0,
                 "unit": getattr(doc_page, "unit", None) or "pixel",
-                "lines": lines_for_layout
+                "lines": lines_for_layout,
             }
             pages_layout.append(page_layout_info)
 
-            done += 1; progress.progress(done / total_to_process)
+            done += 1
+            progress.progress(done / total_to_process)
 
         del pages, page_numbers
         gc.collect()
@@ -535,7 +550,7 @@ if is_input_pdf:
             "📥 補正テキストをダウンロード（TXT, ページ見出しなし）",
             data=joined_txt.encode("utf-8"),
             file_name="ocr_corrected.txt",
-            mime="text/plain"
+            mime="text/plain",
         )
     if pages_layout:
         try:
@@ -544,7 +559,7 @@ if is_input_pdf:
                 "📥 Word（.docx：レイアウト近似）",
                 data=docx_bytes,
                 file_name="ocr_layout.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         except Exception as e:
             st.warning(f"Word出力に失敗しました：{e}")
@@ -560,17 +575,21 @@ else:
             if bgr is None:
                 raise ValueError("画像の読み込みに失敗しました（JPG/PNG/PDFのみ対応）。")
             img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-        pages = [img]; page_numbers = [1]
+        pages = [img]
+        page_numbers = [1]
     except Exception as e:
-        st.exception(e); st.stop()
+        st.exception(e)
+        st.stop()
 
-    all_corrected_texts: List[str] = []
-    pages_layout: List[Dict[str, Any]] = []
+    all_corrected_texts = []
+    pages_layout = []
 
     for page_img, page_num in zip(pages, page_numbers):
         st.write(f"## ページ {page_num}")
         clean_img = remove_red_stamp(page_img)
-        buf = io.BytesIO(); clean_img.save(buf, format="PNG"); buf.seek(0)
+        buf = io.BytesIO()
+        clean_img.save(buf, format="PNG")
+        buf.seek(0)
 
         with st.spinner("OCRを実行中..."):
             t0 = time.perf_counter()
@@ -595,30 +614,29 @@ else:
         gpt_checked_text = default_text if skip_gpt else gpt_fix_text(default_text, dictionary)
 
         # --- セッションキー ---
-# --- セッションキー ---
-ocr_key = f"ocr_{page_num}"
-gpt_key = f"gpt_{page_num}"
-edit_key = f"edit_{page_num}"
+        ocr_key = f"ocr_{page_num}"
+        gpt_key = f"gpt_{page_num}"
+        edit_key = f"edit_{page_num}"
 
-# 初期化（初回だけ）
-if ocr_key not in st.session_state:
-    st.session_state[ocr_key] = default_text
-if gpt_key not in st.session_state:
-    st.session_state[gpt_key] = gpt_checked_text
-if edit_key not in st.session_state:
-    st.session_state[edit_key] = gpt_checked_text
+        if ocr_key not in st.session_state:
+            st.session_state[ocr_key] = default_text
+        if gpt_key not in st.session_state:
+            st.session_state[gpt_key] = gpt_checked_text
+        if edit_key not in st.session_state:
+            st.session_state[edit_key] = gpt_checked_text
 
-# ここを「value=... を渡さず key だけ」にする
-st.text_area(f"OCRテキスト（ページ {page_num}）", height=320, key=ocr_key)
-st.text_area(f"GPT補正（ページ {page_num}）", height=320, key=gpt_key)
-st.text_area(f"手作業修正（ページ {page_num}）", height=320, key=edit_key)
-
-# 保存ボタンでは session_state から読む
-if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
-    corrected_text_current = st.session_state.get(edit_key, gpt_checked_text)
-    learned = learn_charwise_with_missing(default_text, corrected_text_current)
-    ...
-
+        tab1, tab2, tab3, tab4 = st.tabs(["📄 元ファイル", "🖨️ OCRテキスト", "🤖 GPT補正", "✍️ 手作業修正"])
+        with tab1:
+            st.image(clean_img, caption=f"元ファイル (ページ {page_num})", use_container_width=True)
+        with tab2:
+            st.text_area(f"OCRテキスト（ページ {page_num}）", height=320, key=ocr_key)
+        with tab3:
+            st.text_area(f"GPT補正（ページ {page_num}）", height=320, key=gpt_key)
+        with tab4:
+            st.text_area(f"手作業修正（ページ {page_num}）", height=320, key=edit_key)
+            if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
+                corrected_text_current = st.session_state.get(edit_key, gpt_checked_text)
+                learned = learn_charwise_with_missing(default_text, corrected_text_current)
                 if learned:
                     update_dictionary_and_untrained(learned)
                     st.success(f"辞書と学習候補に {len(learned)} 件を追加しました！")
@@ -627,7 +645,12 @@ if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
                 # rerunしない
 
         # TXT
-        final_text_page = (st.session_state.get(edit_key) or st.session_state.get(gpt_key) or gpt_checked_text or default_text).strip()
+        final_text_page = (
+            st.session_state.get(edit_key)
+            or st.session_state.get(gpt_key)
+            or gpt_checked_text
+            or default_text
+        ).strip()
         all_corrected_texts.append(final_text_page)
 
         # Word
@@ -641,7 +664,7 @@ if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
             "page_width": getattr(doc_page, "width", None) or 1.0,
             "page_height": getattr(doc_page, "height", None) or 1.0,
             "unit": getattr(doc_page, "unit", None) or "pixel",
-            "lines": lines_for_layout
+            "lines": lines_for_layout,
         }
         pages_layout.append(page_layout_info)
 
@@ -651,7 +674,7 @@ if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
             "📥 補正テキストをダウンロード（TXT, ページ見出しなし）",
             data=joined_txt.encode("utf-8"),
             file_name="ocr_corrected.txt",
-            mime="text/plain"
+            mime="text/plain",
         )
     if pages_layout:
         try:
@@ -660,7 +683,7 @@ if st.button(f"修正を保存 (ページ {page_num})", key=f"save_{page_num}"):
                 "📥 Word（.docx：レイアウト近似）",
                 data=docx_bytes,
                 file_name="ocr_layout.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         except Exception as e:
             st.warning(f"Word出力に失敗しました：{e}")
