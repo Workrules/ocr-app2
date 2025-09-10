@@ -476,19 +476,19 @@ if is_input_pdf:
     st.caption(f"選択中: {', '.join(str(i+1) for i in chosen_indices) if chosen_indices else '(なし)'} / DPI={dpi}")
 
     run_clicked = st.button("▶ この設定でOCRを実行", type="primary")
-    if run_clicked:
+   # 1) クリックされたか、過去に実行済み（ran=True）なら走る
+# 2) さらに、page_indices が空なら今回の chosen_indices を採用
+if (run_clicked or st.session_state.get("ran")) and chosen_indices:
+    if not st.session_state.get("page_indices"):
         st.session_state["page_indices"] = chosen_indices
-        st.session_state["ran"] = True
-        st.rerun()
-
-    # 実行済みかチェック
-    if not st.session_state.get("ran"):
-        st.stop()
-
-    chosen_indices = st.session_state.get("page_indices", [])
+    st.session_state["ran"] = True
+else:
+    # 選択が空 or まだ実行ボタンが押されていない
     if not chosen_indices:
-        st.error("選択されたページが空です。『全ページ』に切り替えるか、ページ番号を半角/全角どちらでも良いので正しく入力してください（例：1,3,5-7 / １，３，５－７）。")
-        st.stop()
+        st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入れてください。")
+    else:
+        st.warning("実行待ちです。『▶ この設定でOCRを実行』を押してください。")
+    st.stop()
 
     dpi = st.session_state.get("dpi", 200)
     EFFECTIVE_BATCH = int(batch_size_override) if batch_size_override else BATCH_SIZE_DEFAULT
