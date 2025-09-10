@@ -19,7 +19,11 @@ import pypdfium2 as pdfium
 from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.core.credentials import AzureKeyCredential
 
-from openai import OpenAI
+# OpenAI（APIキー未設定でも起動できるよう防御）
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 from docx import Document
 from docx.shared import Cm, Pt
@@ -36,7 +40,11 @@ if not AZURE_DOCINT_ENDPOINT or not AZURE_DOCINT_KEY:
     st.stop()
 
 client = DocumentAnalysisClient(endpoint=AZURE_DOCINT_ENDPOINT, credential=AzureKeyCredential(AZURE_DOCINT_KEY))
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+if OPENAI_API_KEY and OpenAI is not None:
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+else:
+    openai_client = None  # 未設定でもアプリは動く（GPT補正をスキップ）
 
 JP_CHAR_RE = re.compile(r"^[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]$")
 
@@ -165,6 +173,10 @@ def update_dictionary_and_untrained(learned: dict):
     save_json_any(untrained, UNTRAINED_FILE)
 
 def gpt_fix_text(text: str, dictionary: dict) -> str:
+    if openai_client is None:
+        st.info("OPENAI_API_KEY が未設定のため、GPT補正はスキップします。")
+        return text
+
     prompt = f"""
 次のOCR結果を自然な日本語に直してください。
 - 日本語に存在しない文字は「□」にしてください。
@@ -195,9 +207,6 @@ OCR結果:
         return text
 
 # ========== PDFレンダリング ==========
-def is_pdf(b: bytes) -> bool:
-    return len(b) >= 5 and b[:5] == b"%PDF-"
-
 def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: int = 200) -> Tuple[List[Image.Image], List[int]]:
     imgs: List[Image.Image] = []
     nums: List[int] = []
@@ -213,7 +222,7 @@ def render_pdf_selected_pages(pdf_bytes: bytes, indices_0based: List[int], dpi: 
 def parse_page_spec(spec: str, max_pages: int) -> List[int]:
     """
     '1,3,5-7' を 0始まりインデックスへ。
-    全角数字/カンマ/ハイフン/長音も許可（'１，３，５－７' '1ー3' '1—3' など）
+    全角数字/カンマ/各種ダッシュも許可（'１，３，５－７' '1—3' など）
     """
     s = (spec or "").strip()
     if not s:
@@ -338,21 +347,40 @@ else:
 
 # デバッグUI
 st.sidebar.markdown("### 🛠 デバッグ")
-skip_gpt = st.sidebar.checkbox("GPT補正をスキップ", value=False)
+skip_gpt = st.sidebar.checkbox("GPT補正をスキップ", value=(openai_client is None))
 ocr_timeout = st.sidebar.slider("OCRタイムアウト（秒）", 10, 120, 45, step=5)
 batch_size_override = st.sidebar.number_input("バッチサイズ上書き", 1, 20, value=BATCH_SIZE_DEFAULT)
 use_cache = st.sidebar.checkbox("OCRキャッシュ（実験）", value=False)
 debug_log = st.sidebar.checkbox("🔍 詳細ログ", value=True)
 
-# 辞書プレビュー（手動再読込）
+# 辞書プレビュー & 初期化
 dict_preview_box = st.sidebar.container()
 with dict_preview_box:
     st.subheader("📖 現在の辞書（プレビュー）")
     st.json(load_json_any(DICT_FILE))
-if st.sidebar.button("🔄 辞書プレビューを再読込", type="secondary"):
-    with dict_preview_box:
-        st.subheader("📖 現在の辞書（プレビュー）")
-        st.json(load_json_any(DICT_FILE))
+
+def _init_dict_files():
+    try:
+        save_json_any({}, DICT_FILE)
+        save_json_any({}, UNTRAINED_FILE)
+        save_json_any({}, TRAINED_FILE)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+colA, colB = st.sidebar.columns(2)
+with colA:
+    if st.button("🔄 辞書プレビュー再読込", type="secondary"):
+        with dict_preview_box:
+            st.subheader("📖 現在の辞書（プレビュー）")
+            st.json(load_json_any(DICT_FILE))
+with colB:
+    if st.button("🧰 辞書ファイル初期化/作成"):
+        ok, err = _init_dict_files()
+        if ok:
+            st.sidebar.success("辞書ファイルを初期化しました。『再読込』で確認してください。")
+        else:
+            st.sidebar.error(f"初期化に失敗: {err}")
 
 # ===================== アップロード保持 =====================
 if "file_bytes" not in st.session_state:
@@ -361,8 +389,7 @@ if "file_bytes" not in st.session_state:
     st.session_state["file_mime"] = None
     st.session_state["is_pdf"] = False
     st.session_state["dpi"] = 200
-    st.session_state["page_indices"] = []
-    st.session_state["ran"] = False
+    st.session_state["page_indices"] = []  # ← これの有無で実行済みか判断
 
 uploaded = st.file_uploader("画像またはPDFをアップロードしてください", type=["jpg", "jpeg", "png", "pdf"], key="uploader")
 if uploaded is not None:
@@ -370,12 +397,11 @@ if uploaded is not None:
     st.session_state["file_name"] = uploaded.name
     st.session_state["file_mime"] = uploaded.type
     st.session_state["is_pdf"] = (uploaded.type == "application/pdf") or uploaded.name.lower().endswith(".pdf")
-    # 状態初期化
+    # 新規アップロード時は、ページ選択・結果を初期化
     for k in list(st.session_state.keys()):
         if k.startswith("ocr_") or k.startswith("gpt_") or k.startswith("edit_"):
             del st.session_state[k]
     st.session_state["page_indices"] = []
-    st.session_state["ran"] = False
 
 file_bytes = st.session_state["file_bytes"]
 if not file_bytes:
@@ -385,11 +411,12 @@ if not file_bytes:
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 is_input_pdf = st.session_state["is_pdf"]
 
-# ====== サイドバー：実行ステータス ======
+# ====== サイドバー：実行ステータス（ran は page_indices の有無で算出）=====
+ran_status = bool(st.session_state.get("page_indices"))
 st.sidebar.markdown("### 📊 実行ステータス")
 st.sidebar.write({
-    "ran": bool(st.session_state.get("ran")),
-    "has_file": bool(file_bytes),
+    "ran": ran_status,
+    "has_file": bool(st.session_state.get("file_bytes")),
     "is_pdf": bool(is_input_pdf),
     "saved_indices": st.session_state.get("page_indices", []),
     "dpi": st.session_state.get("dpi", 200),
@@ -439,7 +466,7 @@ def _ocr_dispatch(png_bytes: bytes, timeout_sec: float, use_cache: bool) -> dict
     else:
         return _ocr_polling(png_bytes, timeout_sec)
 
-# ===================== ページ選択（常時UI＋実行ボタン） =====================
+# ===================== ページ選択（常時UI＋ボタンだが自動補完あり） =====================
 if is_input_pdf:
     # PDFページ数
     try:
@@ -474,27 +501,19 @@ if is_input_pdf:
 
     st.caption(f"選択中: {', '.join(str(i+1) for i in chosen_indices) if chosen_indices else '(なし)'} / DPI={dpi}")
 
-    # 実行ボタン（キー固定）
+    # 実行ボタン
     run_clicked = st.button("▶ この設定でOCRを実行", type="primary", key="run_pdf")
 
-    # --- 強制実行ロジック（else を使わず構文崩れ防止） ---
-    if run_clicked:
+    # クリックされたら今回の選択を保存
+    if run_clicked and chosen_indices:
         st.session_state["page_indices"] = chosen_indices
-        st.session_state["ran"] = True
 
-    if not st.session_state.get("ran"):
-        if not chosen_indices:
-            st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入力してください。")
-        else:
-            st.warning("実行待ちです。『▶ この設定でOCRを実行』を押してください。")
-        st.stop()
-
+    # --- 自動補完：page_indices がまだ空なら埋める（押し忘れ・空入力対策） ---
     if not st.session_state.get("page_indices"):
         if chosen_indices:
             st.session_state["page_indices"] = chosen_indices
         else:
-            st.error("選択されたページが空です。『全ページ』に切り替えるか、範囲/ページ番号を入力してください。")
-            st.stop()
+            st.session_state["page_indices"] = list(range(total_pages))  # 全ページで強制実行
 
     # 以降、この実行で使うページ指定を固定
     chosen_indices = st.session_state["page_indices"]
@@ -514,9 +533,7 @@ if is_input_pdf:
     for batch_no, batch_indices in enumerate(chunked(chosen_indices, EFFECTIVE_BATCH), start=1):
         status_area.info(f"🔄 バッチ {batch_no} / {((total_to_process - 1) // EFFECTIVE_BATCH) + 1} （ページ: {', '.join(str(i+1) for i in batch_indices)}）")
         try:
-            st.write(f"🖼 レンダリング開始（{len(batch_indices)}ページ）...")
             pages, page_numbers = render_pdf_selected_pages(file_bytes, batch_indices, dpi=dpi)
-            st.write(f"✅ レンダリング完了: {len(pages)}ページ")
         except Exception as e:
             st.exception(e); st.stop()
 
@@ -614,6 +631,7 @@ if is_input_pdf:
 
 # ===================== 画像：1ページ処理 =====================
 else:
+    # 画像として1ページ処理
     try:
         try:
             img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
@@ -629,8 +647,11 @@ else:
 
     st.caption("単一画像としてOCRします。")
     run_img = st.button("▶ この画像でOCRを実行", type="primary", key="run_img")
-    if not run_img:
-        st.stop()
+    if not run_img and not st.session_state.get("page_indices"):
+        # 初回の押し忘れでも1ページ実行にフォールバック
+        st.session_state["page_indices"] = [0]
+    elif run_img:
+        st.session_state["page_indices"] = [0]
 
     all_corrected_texts: List[str] = []
     pages_layout: List[Dict[str, Any]] = []
